@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apexforge-nightscript"
+version = "0.1.0"
+description = "Prototype compiler for ApexForge NightScript"
+requires-python = ">=3.13"
+
+[project.scripts]
+night = "night.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "compiler"}
+
+[tool.setuptools.packages.find]
+where = ["compiler"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
