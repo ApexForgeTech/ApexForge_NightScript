@@ -1,0 +1,18 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn sum_slice(s: []i32) -> i32 {
+    let total: i32 = 0;
+    let i: i32 = 0;
+    while i < s.len as i32 {
+        total += s.ptr[i];
+        i += 1;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    puts("Hello, world!");
+    return 0;
+}

@@ -138,8 +138,12 @@ static Node *parse_unary(Parser *p);
 static Node *parse_cast(Parser *p);
 static Node *parse_factor(Parser *p);
 static Node *parse_term(Parser *p);
+static Node *parse_shift(Parser *p);
 static Node *parse_comparison(Parser *p);
 static Node *parse_equality(Parser *p);
+static Node *parse_bitwise_and(Parser *p);
+static Node *parse_bitwise_xor(Parser *p);
+static Node *parse_bitwise_or(Parser *p);
 static Node *parse_logical_and(Parser *p);
 static Node *parse_logical_or(Parser *p);
 static Node *parse_assign(Parser *p);
@@ -336,6 +340,20 @@ static Node *parse_postfix(Parser *p) {
             expr = n;
             continue;
         }
+        /* postfix ++ / -- : desugar to compound assign */
+        if (match(p, TOK_PLUSPLUS) || match(p, TOK_MINUSMINUS)) {
+            Token *op  = prev(p);
+            const char *cop = (op->kind == TOK_PLUSPLUS) ? "+" : "-";
+            /* build integer literal 1 */
+            Node *one = node_new(p, NODE_LIT_INT, op->line, op->col);
+            one->as.lit_int.value = 1;
+            Node *n = node_new(p, NODE_ASSIGN, op->line, op->col);
+            n->as.assign.target = expr;
+            n->as.assign.value  = one;
+            n->as.assign.op     = arena_strdup(p->arena, cop, 1);
+            expr = n;
+            continue;
+        }
         break;
     }
     return expr;
@@ -344,7 +362,8 @@ static Node *parse_postfix(Parser *p) {
 static Node *parse_unary(Parser *p) {
     Token *t = cur(p);
     if (match(p, TOK_BANG) || match(p, TOK_MINUS) ||
-        match(p, TOK_STAR) || match(p, TOK_AMP)) {
+        match(p, TOK_STAR) || match(p, TOK_AMP)   ||
+        match(p, TOK_TILDE)) {
         Token *op = prev(p);
         Node *operand = parse_unary(p);
         Node *n = node_new(p, NODE_UNARY, op->line, op->col);
@@ -397,17 +416,33 @@ static Node *parse_term(Parser *p) {
     TokenKind ops[] = {TOK_PLUS, TOK_MINUS};
     return parse_binop(p, parse_factor, ops, 2);
 }
+static Node *parse_shift(Parser *p) {
+    TokenKind ops[] = {TOK_LSHIFT, TOK_RSHIFT};
+    return parse_binop(p, parse_term, ops, 2);
+}
 static Node *parse_comparison(Parser *p) {
     TokenKind ops[] = {TOK_LT, TOK_GT, TOK_LE, TOK_GE};
-    return parse_binop(p, parse_term, ops, 4);
+    return parse_binop(p, parse_shift, ops, 4);
 }
 static Node *parse_equality(Parser *p) {
     TokenKind ops[] = {TOK_EQEQ, TOK_NE};
     return parse_binop(p, parse_comparison, ops, 2);
 }
+static Node *parse_bitwise_and(Parser *p) {
+    TokenKind ops[] = {TOK_AMP};
+    return parse_binop(p, parse_equality, ops, 1);
+}
+static Node *parse_bitwise_xor(Parser *p) {
+    TokenKind ops[] = {TOK_CARET};
+    return parse_binop(p, parse_bitwise_and, ops, 1);
+}
+static Node *parse_bitwise_or(Parser *p) {
+    TokenKind ops[] = {TOK_PIPE};
+    return parse_binop(p, parse_bitwise_xor, ops, 1);
+}
 static Node *parse_logical_and(Parser *p) {
     TokenKind ops[] = {TOK_ANDAND};
-    return parse_binop(p, parse_equality, ops, 1);
+    return parse_binop(p, parse_bitwise_or, ops, 1);
 }
 static Node *parse_logical_or(Parser *p) {
     TokenKind ops[] = {TOK_OROR};
@@ -530,6 +565,50 @@ static Node *parse_stmt(Parser *p) {
         return n;
     }
 
+    if (match(p, TOK_FOR)) {
+        /* for [init] ; [cond] ; [post] { body }
+           init is a let/const decl or expression (no trailing ';' — the ';' is the separator)
+           all three parts are optional */
+        Node *init = NULL;
+        Node *cond = NULL;
+        Node *post = NULL;
+
+        if (!check(p, TOK_SEMICOLON)) {
+            if (check(p, TOK_LET)) {
+                p->pos++; /* consume 'let' */
+                Token *vname = expect(p, TOK_IDENT, "expected variable name");
+                Node *vtype  = NULL;
+                Node *vval   = NULL;
+                if (match(p, TOK_COLON)) vtype = parse_type(p);
+                if (match(p, TOK_EQ))    vval  = parse_expr(p);
+                init = node_new(p, NODE_LET, t->line, t->col);
+                init->as.let.name  = intern(p, vname);
+                init->as.let.type  = vtype;
+                init->as.let.value = vval;
+            } else {
+                Node *expr = parse_expr(p);
+                init = node_new(p, NODE_EXPR_STMT, expr->line, expr->col);
+                init->as.expr_stmt.expr = expr;
+            }
+        }
+        expect(p, TOK_SEMICOLON, "expected ';' after for init");
+
+        if (!check(p, TOK_SEMICOLON))
+            cond = parse_expr(p);
+        expect(p, TOK_SEMICOLON, "expected ';' after for condition");
+
+        if (!check(p, TOK_LBRACE))
+            post = parse_expr(p);
+
+        Node *body = parse_block(p);
+        Node *n    = node_new(p, NODE_FOR, t->line, t->col);
+        n->as.for_stmt.init = init;
+        n->as.for_stmt.cond = cond;
+        n->as.for_stmt.post = post;
+        n->as.for_stmt.body = body;
+        return n;
+    }
+
     if (match(p, TOK_LOOP)) {
         Node *body = parse_block(p);
         Node *n    = node_new(p, NODE_LOOP, t->line, t->col);
@@ -621,6 +700,11 @@ static Node *parse_decl(Parser *p) {
 
     if (match(p, TOK_IMPL)) {
         Token *target = expect(p, TOK_IDENT, "expected type name after impl");
+        char *iface_name = NULL;
+        if (match(p, TOK_COLON)) {
+            Token *iface = expect(p, TOK_IDENT, "expected interface name after ':'");
+            iface_name = intern(p, iface);
+        }
         expect(p, TOK_LBRACE, "expected '{' after impl target");
         NodeList methods = {0};
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -631,8 +715,64 @@ static Node *parse_decl(Parser *p) {
         }
         expect(p, TOK_RBRACE, "expected '}' after impl block");
         Node *n = node_new(p, NODE_IMPL_DECL, t->line, t->col);
-        n->as.impl.target  = intern(p, target);
-        n->as.impl.methods = methods;
+        n->as.impl.target         = intern(p, target);
+        n->as.impl.interface_name = iface_name;
+        n->as.impl.methods        = methods;
+        return n;
+    }
+
+    if (match(p, TOK_INTERFACE)) {
+        Token *name = expect(p, TOK_IDENT, "expected interface name");
+        expect(p, TOK_LBRACE, "expected '{' after interface name");
+        NodeList methods = {0};
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            match(p, TOK_PUB);
+            expect(p, TOK_FN, "expected 'fn' in interface body");
+            Token *fn_tok = prev(p);
+            Token *mname  = expect(p, TOK_IDENT, "expected method name");
+            NodeList params = parse_params(p);
+            expect(p, TOK_ARROW, "expected '->' in interface method");
+            Node *ret = parse_type(p);
+            expect(p, TOK_SEMICOLON, "expected ';' after interface method");
+            Node *m = node_new(p, NODE_FN_DECL, fn_tok->line, fn_tok->col);
+            m->as.fn.name       = intern(p, mname);
+            m->as.fn.owner_type = NULL;
+            m->as.fn.params     = params;
+            m->as.fn.ret_type   = ret;
+            m->as.fn.body       = NULL;
+            m->as.fn.is_public  = 1;
+            nodelist_push(p, &methods, m);
+        }
+        expect(p, TOK_RBRACE, "expected '}' after interface");
+        Node *n = node_new(p, NODE_INTERFACE_DECL, t->line, t->col);
+        n->as.interface_decl.name      = intern(p, name);
+        n->as.interface_decl.methods   = methods;
+        n->as.interface_decl.is_public = is_public;
+        return n;
+    }
+
+    if (match(p, TOK_PACKED)) {
+        /* packed struct */
+        expect(p, TOK_STRUCT, "expected 'struct' after 'packed'");
+        Token *name = expect(p, TOK_IDENT, "expected struct name");
+        expect(p, TOK_LBRACE, "expected '{' after struct name");
+        NodeList fields = {0};
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            Token *fn_tok = expect(p, TOK_IDENT, "expected field name");
+            expect(p, TOK_COLON, "expected ':' after field name");
+            Node *ftype = parse_type(p);
+            expect(p, TOK_SEMICOLON, "expected ';' after field");
+            Node *field = node_new(p, NODE_LET, fn_tok->line, fn_tok->col);
+            field->as.let.name = intern(p, fn_tok);
+            field->as.let.type = ftype;
+            nodelist_push(p, &fields, field);
+        }
+        expect(p, TOK_RBRACE, "expected '}' after packed struct");
+        Node *n = node_new(p, NODE_STRUCT_DECL, t->line, t->col);
+        n->as.struct_decl.name      = intern(p, name);
+        n->as.struct_decl.fields    = fields;
+        n->as.struct_decl.is_public = is_public;
+        n->as.struct_decl.is_packed = 1;
         return n;
     }
 
@@ -661,26 +801,46 @@ static Node *parse_decl(Parser *p) {
     if (match(p, TOK_ENUM)) {
         Token *name = expect(p, TOK_IDENT, "expected enum name");
         expect(p, TOK_LBRACE, "expected '{' after enum name");
-        int    cap      = 8;
-        char **variants = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
-        int    count    = 0;
+        int       cap      = 8;
+        char    **variants = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+        NodeList *vfields  = arena_alloc(p->arena, (size_t)cap * sizeof(NodeList));
+        int       count    = 0;
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
             Token *v = expect(p, TOK_IDENT, "expected enum variant");
-            expect(p, TOK_SEMICOLON, "expected ';' after variant");
             if (count == cap) {
                 cap *= 2;
-                char **nv = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+                char    **nv = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+                NodeList *nf = arena_alloc(p->arena, (size_t)cap * sizeof(NodeList));
                 memcpy(nv, variants, (size_t)count * sizeof(char *));
-                variants = nv;
+                memcpy(nf, vfields,  (size_t)count * sizeof(NodeList));
+                variants = nv; vfields = nf;
             }
-            variants[count++] = intern(p, v);
+            variants[count] = intern(p, v);
+            memset(&vfields[count], 0, sizeof(NodeList));
+            /* optional data fields: Variant(field: type, ...) */
+            if (match(p, TOK_LPAREN)) {
+                while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                    Token *fn_tok = expect(p, TOK_IDENT, "expected field name");
+                    expect(p, TOK_COLON, "expected ':' after field name");
+                    Node *ftype = parse_type(p);
+                    Node *field = node_new(p, NODE_LET, fn_tok->line, fn_tok->col);
+                    field->as.let.name = intern(p, fn_tok);
+                    field->as.let.type = ftype;
+                    nodelist_push(p, &vfields[count], field);
+                    if (!check(p, TOK_RPAREN)) match(p, TOK_COMMA);
+                }
+                expect(p, TOK_RPAREN, "expected ')' after variant fields");
+            }
+            expect(p, TOK_SEMICOLON, "expected ';' after variant");
+            count++;
         }
         expect(p, TOK_RBRACE, "expected '}' after enum");
         Node *n = node_new(p, NODE_ENUM_DECL, t->line, t->col);
-        n->as.enum_decl.name      = intern(p, name);
-        n->as.enum_decl.variants  = variants;
-        n->as.enum_decl.count     = count;
-        n->as.enum_decl.is_public = is_public;
+        n->as.enum_decl.name           = intern(p, name);
+        n->as.enum_decl.variants       = variants;
+        n->as.enum_decl.variant_fields = vfields;
+        n->as.enum_decl.count          = count;
+        n->as.enum_decl.is_public      = is_public;
         return n;
     }
 

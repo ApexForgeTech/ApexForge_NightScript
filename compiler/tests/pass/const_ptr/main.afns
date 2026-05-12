@@ -1,0 +1,19 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn read_byte(ptr: *const u8) -> u8 {
+    unsafe {
+        return *ptr;
+    }
+}
+
+fn main() -> i32 {
+    let x: u8 = 42;
+    let p: *const u8 = &x as *const u8;
+    let v: u8 = read_byte(p);
+    if v == 42 {
+        puts("ok");
+    }
+    return 0;
+}

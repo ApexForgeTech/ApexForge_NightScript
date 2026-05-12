@@ -291,6 +291,12 @@ static void collect_slice_types_in_node(SliceDef **defs, Node *node) {
         case NODE_UNSAFE:
             collect_slice_types_in_node(defs, node->as.loop_stmt.body);
             return;
+        case NODE_FOR:
+            collect_slice_types_in_node(defs, node->as.for_stmt.init);
+            collect_slice_types_in_node(defs, node->as.for_stmt.cond);
+            collect_slice_types_in_node(defs, node->as.for_stmt.post);
+            collect_slice_types_in_node(defs, node->as.for_stmt.body);
+            return;
         case NODE_EXPR_STMT:
             collect_slice_types_in_node(defs, node->as.expr_stmt.expr);
             return;
@@ -366,11 +372,10 @@ static void emit_type_left(COut *o, Node *t) {
             break;
         }
         case NODE_TYPE_POINTER:
-            emit_type_left(o, t->as.type_ptr.inner);
             if (t->as.type_ptr.is_const)
-                emit(o, " const*");
-            else
-                emit(o, "*");
+                emit(o, "const ");
+            emit_type_left(o, t->as.type_ptr.inner);
+            emit(o, "*");
             break;
         case NODE_TYPE_ARRAY:
             if (t->as.type_array.length < 0) {
@@ -536,6 +541,14 @@ static int is_known_type_name(CGContext *cg, const char *name) {
            find_decl_named(cg->program, NODE_UNION_DECL, name);
 }
 
+static int enum_is_data_carrying(Node *d) {
+    for (int j = 0; j < d->as.enum_decl.count; j++) {
+        if (d->as.enum_decl.variant_fields[j].count > 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int enum_has_variant(CGContext *cg, const char *enum_name, const char *variant) {
     Node *decl = find_decl_named(cg->program, NODE_ENUM_DECL, enum_name);
     if (!decl) return 0;
@@ -623,9 +636,20 @@ static void emit_match_condition(COut *o, CGContext *cg, Node *subject, const ch
         return;
     }
 
+    char enum_name[128];
+    int elen = (int)(dot - pattern);
+    if (elen >= 127) elen = 127;
+    memcpy(enum_name, pattern, (size_t)elen);
+    enum_name[elen] = '\0';
+
+    Node *decl = find_decl_named(cg->program, NODE_ENUM_DECL, enum_name);
+    int is_data = decl && enum_is_data_carrying(decl);
+
     emit_expr(o, cg, subject);
-    emit(o, " == ");
-    emit(o, "%.*s_%s", (int)(dot - pattern), pattern, dot + 1);
+    if (is_data)
+        emit(o, ".tag == %s_%s", enum_name, dot + 1);
+    else
+        emit(o, " == %s_%s", enum_name, dot + 1);
 }
 
 static void emit_match_expr(COut *o, CGContext *cg, Node *match) {
@@ -795,8 +819,9 @@ static MethodResolution resolve_method_call(CGContext *cg, Node *call) {
 
     if (object->kind == NODE_IDENT && is_known_type_name(cg, object->as.ident.name)) {
         Node *method = find_method(cg, object->as.ident.name, callee->as.field.field);
-        if (method && !method_has_receiver(method)) {
+        if (method) {
             result.method = method;
+            /* receiver is either absent (static) or passed explicitly as first arg */
             result.receiver = RECEIVER_NONE;
         }
         return result;
@@ -1073,6 +1098,41 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             emit(o, "\n");
             break;
         }
+        case NODE_FOR: {
+            emit_indent(o);
+            emit(o, "for (");
+            cg_push_scope(cg);
+            /* init */
+            if (n->as.for_stmt.init) {
+                Node *init = n->as.for_stmt.init;
+                if (init->kind == NODE_LET) {
+                    Node *type = init->as.let.type
+                                 ? init->as.let.type
+                                 : infer_expr_type(cg, init->as.let.value);
+                    emit_typed_name(o, type ? type : cg_temp_type_named(cg, "void"), init->as.let.name);
+                    if (init->as.let.value) {
+                        emit(o, " = ");
+                        emit_expr(o, cg, init->as.let.value);
+                    }
+                    cg_define(cg, init->as.let.name, type);
+                } else if (init->kind == NODE_EXPR_STMT) {
+                    emit_expr(o, cg, init->as.expr_stmt.expr);
+                }
+            }
+            emit(o, "; ");
+            /* cond */
+            if (n->as.for_stmt.cond)
+                emit_expr(o, cg, n->as.for_stmt.cond);
+            emit(o, "; ");
+            /* post */
+            if (n->as.for_stmt.post)
+                emit_expr(o, cg, n->as.for_stmt.post);
+            emit(o, ") ");
+            emit_block(o, cg, n->as.for_stmt.body);
+            cg_pop_scope(cg);
+            emit(o, "\n");
+            break;
+        }
         case NODE_UNSAFE: {
             emit_indent(o);
             emit_block(o, cg, n->as.loop_stmt.body);
@@ -1250,6 +1310,11 @@ static void emit_type_definitions(COut *o, Node *prog) {
             emit(o, "typedef union %s %s;\n", d->as.union_decl.name, d->as.union_decl.name);
             emitted_forward = 1;
         }
+
+        if (d->kind == NODE_ENUM_DECL && enum_is_data_carrying(d)) {
+            emit(o, "typedef struct %s %s;\n", d->as.enum_decl.name, d->as.enum_decl.name);
+            emitted_forward = 1;
+        }
     }
 
     if (emitted_forward)
@@ -1259,11 +1324,39 @@ static void emit_type_definitions(COut *o, Node *prog) {
         Node *d = prog->as.program.decls.items[i];
 
         if (d->kind == NODE_ENUM_DECL) {
-            emit(o, "typedef enum {\n");
-            for (int j = 0; j < d->as.enum_decl.count; j++)
-                emit(o, "    %s_%s = %d,\n",
-                     d->as.enum_decl.name, d->as.enum_decl.variants[j], j);
-            emit(o, "} %s;\n\n", d->as.enum_decl.name);
+            if (enum_is_data_carrying(d)) {
+                /* tagged union: emit tag enum + struct wrapper */
+                emit(o, "typedef enum {\n");
+                for (int j = 0; j < d->as.enum_decl.count; j++)
+                    emit(o, "    %s_%s = %d,\n",
+                         d->as.enum_decl.name, d->as.enum_decl.variants[j], j);
+                emit(o, "} %s_Tag;\n\n", d->as.enum_decl.name);
+
+                emit(o, "struct %s {\n", d->as.enum_decl.name);
+                emit(o, "    %s_Tag tag;\n", d->as.enum_decl.name);
+                emit(o, "    union {\n");
+                for (int j = 0; j < d->as.enum_decl.count; j++) {
+                    NodeList *fields = &d->as.enum_decl.variant_fields[j];
+                    if (fields->count > 0) {
+                        emit(o, "        struct {\n");
+                        for (int k = 0; k < fields->count; k++) {
+                            Node *f = fields->items[k];
+                            emit(o, "            ");
+                            emit_typed_name(o, f->as.let.type, f->as.let.name);
+                            emit(o, ";\n");
+                        }
+                        emit(o, "        } %s;\n", d->as.enum_decl.variants[j]);
+                    }
+                }
+                emit(o, "    } as;\n");
+                emit(o, "};\n\n");
+            } else {
+                emit(o, "typedef enum {\n");
+                for (int j = 0; j < d->as.enum_decl.count; j++)
+                    emit(o, "    %s_%s = %d,\n",
+                         d->as.enum_decl.name, d->as.enum_decl.variants[j], j);
+                emit(o, "} %s;\n\n", d->as.enum_decl.name);
+            }
         }
     }
 
@@ -1296,7 +1389,10 @@ static void emit_type_definitions(COut *o, Node *prog) {
                 emit_typed_name(o, f->as.let.type, f->as.let.name);
                 emit(o, ";\n");
             }
-            emit(o, "};\n\n");
+            if (d->as.struct_decl.is_packed)
+                emit(o, "} __attribute__((packed));\n\n");
+            else
+                emit(o, "};\n\n");
         }
 
         if (d->kind == NODE_UNION_DECL) {

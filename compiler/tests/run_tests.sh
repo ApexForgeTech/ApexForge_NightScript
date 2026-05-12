@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..10\n'
+printf '1..15\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -104,3 +104,35 @@ printf 'ok 9 - break outside loop diagnostic\n'
 
 run_fail_case "$FAIL_DIR/slice_bad_field.afns" "$FAIL_DIR/slice_bad_field.err" "slice bad field diagnostic"
 printf 'ok 10 - slice bad field diagnostic\n'
+
+run_capture "compound assign check" "$NIGHT" check "$PASS_DIR/compound_assign/main.afns"
+run_capture "compound assign build" "$NIGHT" build "$PASS_DIR/compound_assign/main.afns" -o "$TMP_DIR/ca_bin"
+run_capture "compound assign codegen" "$NIGHT" codegen "$PASS_DIR/compound_assign/main.afns"
+assert_contains "$TMP_DIR/stdout" "x += 5" "compound assign += emission"
+assert_contains "$TMP_DIR/stdout" "x %= 7" "compound assign %= emission"
+printf 'ok 11 - compound assignment operators\n'
+
+run_capture "indexing check" "$NIGHT" check "$PASS_DIR/indexing/main.afns"
+run_capture "indexing build" "$NIGHT" build "$PASS_DIR/indexing/main.afns" -o "$TMP_DIR/idx_bin"
+run_capture "indexing codegen" "$NIGHT" codegen "$PASS_DIR/indexing/main.afns"
+assert_contains "$TMP_DIR/stdout" "s.ptr[i]" "slice index emission"
+printf 'ok 12 - array/slice indexing\n'
+
+run_capture "defer check" "$NIGHT" check "$PASS_DIR/defer_test/main.afns"
+run_capture "defer build" "$NIGHT" build "$PASS_DIR/defer_test/main.afns" -o "$TMP_DIR/defer_bin"
+run_capture "defer codegen" "$NIGHT" codegen "$PASS_DIR/defer_test/main.afns"
+assert_contains "$TMP_DIR/stdout" "puts(\"goodbye\")" "defer call emission"
+printf 'ok 13 - defer statement\n'
+
+run_capture "for loop check" "$NIGHT" check "$PASS_DIR/for_loop/main.afns"
+run_capture "for loop build" "$NIGHT" build "$PASS_DIR/for_loop/main.afns" -o "$TMP_DIR/for_bin"
+run_capture "for loop codegen" "$NIGHT" codegen "$PASS_DIR/for_loop/main.afns"
+assert_contains "$TMP_DIR/stdout" "for (int32_t i = 0;" "for loop init emission"
+assert_contains "$TMP_DIR/stdout" "i += 1)" "for loop post emission"
+printf 'ok 14 - for loop\n'
+
+run_capture "packed struct check" "$NIGHT" check "$PASS_DIR/packed_struct/main.afns"
+run_capture "packed struct build" "$NIGHT" build "$PASS_DIR/packed_struct/main.afns" -o "$TMP_DIR/packed_bin"
+run_capture "packed struct codegen" "$NIGHT" codegen "$PASS_DIR/packed_struct/main.afns"
+assert_contains "$TMP_DIR/stdout" "__attribute__((packed))" "packed struct emission"
+printf 'ok 15 - packed struct\n'

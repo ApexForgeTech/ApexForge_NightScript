@@ -270,6 +270,23 @@ static void dump_node(FILE *out, Node *node, int indent) {
             print_child_label(out, indent + 1, "body");
             dump_node(out, node->as.while_stmt.body, indent + 2);
             return;
+        case NODE_FOR:
+            print_line(out, indent, "For");
+            if (node->as.for_stmt.init) {
+                print_child_label(out, indent + 1, "init");
+                dump_node(out, node->as.for_stmt.init, indent + 2);
+            }
+            if (node->as.for_stmt.cond) {
+                print_child_label(out, indent + 1, "cond");
+                dump_node(out, node->as.for_stmt.cond, indent + 2);
+            }
+            if (node->as.for_stmt.post) {
+                print_child_label(out, indent + 1, "post");
+                dump_node(out, node->as.for_stmt.post, indent + 2);
+            }
+            print_child_label(out, indent + 1, "body");
+            dump_node(out, node->as.for_stmt.body, indent + 2);
+            return;
         case NODE_LOOP:
             print_line(out, indent, "Loop");
             print_child_label(out, indent + 1, "body");
@@ -313,7 +330,9 @@ static void dump_node(FILE *out, Node *node, int indent) {
             return;
         case NODE_STRUCT_DECL:
             print_indent(out, indent);
-            fprintf(out, "StructDecl(name=%s)\n", node->as.struct_decl.name);
+            fprintf(out, "StructDecl(name=%s, packed=%s)\n",
+                    node->as.struct_decl.name,
+                    bool_word(node->as.struct_decl.is_packed));
             dump_node_list(out, "fields", &node->as.struct_decl.fields, indent + 1);
             return;
         case NODE_ENUM_DECL:
@@ -331,8 +350,19 @@ static void dump_node(FILE *out, Node *node, int indent) {
             return;
         case NODE_IMPL_DECL:
             print_indent(out, indent);
-            fprintf(out, "ImplDecl(target=%s)\n", node->as.impl.target);
+            if (node->as.impl.interface_name)
+                fprintf(out, "ImplDecl(target=%s, interface=%s)\n",
+                        node->as.impl.target, node->as.impl.interface_name);
+            else
+                fprintf(out, "ImplDecl(target=%s)\n", node->as.impl.target);
             dump_node_list(out, "methods", &node->as.impl.methods, indent + 1);
+            return;
+        case NODE_INTERFACE_DECL:
+            print_indent(out, indent);
+            fprintf(out, "InterfaceDecl(name=%s%s)\n",
+                    node->as.interface_decl.name,
+                    node->as.interface_decl.is_public ? ", pub" : "");
+            dump_node_list(out, "methods", &node->as.interface_decl.methods, indent + 1);
             return;
         default:
             print_line(out, indent, "<unknown node>");

@@ -1,0 +1,30 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+interface Drawable {
+    fn draw(self: *Self) -> void;
+    fn area(self: *Self) -> i32;
+}
+
+struct Circle {
+    radius: i32;
+}
+
+impl Circle : Drawable {
+    fn draw(self: *Circle) -> void {
+        puts("draw circle");
+    }
+    fn area(self: *Circle) -> i32 {
+        return self.radius * self.radius;
+    }
+}
+
+fn main() -> i32 {
+    let c: Circle = Circle { radius: 5 };
+    let a: i32 = Circle.area(&c);
+    if a == 25 {
+        puts("ok");
+    }
+    return 0;
+}

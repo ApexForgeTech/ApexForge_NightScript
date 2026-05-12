@@ -21,6 +21,7 @@ static const Keyword KEYWORDS[] = {
     {"else",      TOK_ELSE},
     {"while",     TOK_WHILE},
     {"loop",      TOK_LOOP},
+    {"for",       TOK_FOR},
     {"break",     TOK_BREAK},
     {"continue",  TOK_CONTINUE},
     {"struct",    TOK_STRUCT},
@@ -41,6 +42,7 @@ static const Keyword KEYWORDS[] = {
     {"module",    TOK_MODULE},
     {"defer",     TOK_DEFER},
     {"comptime",  TOK_COMPTIME},
+    {"packed",    TOK_PACKED},
     {"true",      TOK_TRUE},
     {"false",     TOK_FALSE},
     {"null",      TOK_NULL},
@@ -181,11 +183,15 @@ int lexer_tokenize(const char *source, const char *source_name, TokenList *out) 
         if (c == '>' && n == '=') { advance(&l); advance(&l); t.kind = TOK_GE;        t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '&' && n == '&') { advance(&l); advance(&l); t.kind = TOK_ANDAND;    t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '|' && n == '|') { advance(&l); advance(&l); t.kind = TOK_OROR;      t.start = l.src + l.pos - 2; t.len = 2; goto push; }
+        if (c == '+' && n == '+') { advance(&l); advance(&l); t.kind = TOK_PLUSPLUS;    t.start = l.src + l.pos - 2; t.len = 2; goto push; }
+        if (c == '-' && n == '-') { advance(&l); advance(&l); t.kind = TOK_MINUSMINUS;  t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '+' && n == '=') { advance(&l); advance(&l); t.kind = TOK_PLUS_EQ;    t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '-' && n == '=') { advance(&l); advance(&l); t.kind = TOK_MINUS_EQ;   t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '*' && n == '=') { advance(&l); advance(&l); t.kind = TOK_STAR_EQ;    t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '/' && n == '=') { advance(&l); advance(&l); t.kind = TOK_SLASH_EQ;   t.start = l.src + l.pos - 2; t.len = 2; goto push; }
         if (c == '%' && n == '=') { advance(&l); advance(&l); t.kind = TOK_PERCENT_EQ; t.start = l.src + l.pos - 2; t.len = 2; goto push; }
+        if (c == '<' && n == '<') { advance(&l); advance(&l); t.kind = TOK_LSHIFT;      t.start = l.src + l.pos - 2; t.len = 2; goto push; }
+        if (c == '>' && n == '>') { advance(&l); advance(&l); t.kind = TOK_RSHIFT;      t.start = l.src + l.pos - 2; t.len = 2; goto push; }
 
         /* identifier or keyword */
         if (isalpha((unsigned char)c) || c == '_') {

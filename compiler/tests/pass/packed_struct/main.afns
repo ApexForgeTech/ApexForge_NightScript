@@ -1,0 +1,12 @@
+package pktest;
+
+packed struct Header {
+    magic: u16;
+    flags: u8;
+    size:  u32;
+}
+
+fn main() -> i32 {
+    let h: Header = Header { magic: 0xAB12, flags: 1, size: 64 };
+    return 0;
+}

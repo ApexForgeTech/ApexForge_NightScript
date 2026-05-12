@@ -39,6 +39,7 @@ typedef enum {
     NODE_BREAK,
     NODE_CONTINUE,
     NODE_DEFER,
+    NODE_FOR,
     NODE_EXPR_STMT,
 
     /* declarations */
@@ -51,6 +52,7 @@ typedef enum {
     NODE_ENUM_DECL,
     NODE_UNION_DECL,
     NODE_IMPL_DECL,
+    NODE_INTERFACE_DECL,
 } NodeKind;
 
 /* ── forward declaration ───────────────────────────────────────────────── */
@@ -205,6 +207,16 @@ struct Node {
         /* NODE_DEFER */
         struct { Node *expr; } defer_stmt;
 
+        /* NODE_FOR — C-style: for init; cond; post { body }
+           init is NODE_LET or NODE_EXPR_STMT (or NULL), cond may be NULL (infinite),
+           post is a bare expression (or NULL) */
+        struct {
+            Node *init;
+            Node *cond;
+            Node *post;
+            Node *body;
+        } for_stmt;
+
         /* NODE_EXPR_STMT */
         struct { Node *expr; } expr_stmt;
 
@@ -242,14 +254,17 @@ struct Node {
             char    *name;
             NodeList fields;   /* each field: NODE_LET (name+type) */
             int      is_public;
+            int      is_packed;
         } struct_decl;
 
-        /* NODE_ENUM_DECL */
+        /* NODE_ENUM_DECL
+           variant_fields[i] is NULL for simple variants, or a NodeList* for data-carrying */
         struct {
-            char  *name;
-            char **variants;
-            int    count;
-            int    is_public;
+            char      *name;
+            char     **variants;       /* variant names */
+            NodeList  *variant_fields; /* parallel: NULL entry = simple variant */
+            int        count;
+            int        is_public;
         } enum_decl;
 
         /* NODE_UNION_DECL */
@@ -262,8 +277,16 @@ struct Node {
         /* NODE_IMPL_DECL */
         struct {
             char    *target;
+            char    *interface_name;  /* NULL for plain impl, set for impl T : Interface */
             NodeList methods;
         } impl;
+
+        /* NODE_INTERFACE_DECL */
+        struct {
+            char    *name;
+            NodeList methods;  /* each: NODE_FN_DECL with body=NULL */
+            int      is_public;
+        } interface_decl;
 
     } as;
 };

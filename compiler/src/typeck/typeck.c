@@ -806,12 +806,7 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 if (object->kind == NODE_IDENT) {
                     Node *method = find_method_decl(c->sema, object->as.ident.name, callee->as.field.field);
                     if (method) {
-                        if (method_has_receiver(method)) {
-                            typeck_error(c, callee->line, callee->col,
-                                         "method '%s.%s' requires an instance",
-                                         object->as.ident.name, callee->as.field.field);
-                            return &TYPE_ERROR_VALUE;
-                        }
+                        /* Type.method(args...) — receiver passed explicitly as first arg */
                         if (!check_call_arguments(c, &method->as.fn.params, 0,
                                                   &expr->as.call.args, scope, unsafe_depth,
                                                   expr->line, expr->col)) {
@@ -1174,6 +1169,41 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
             }
             scope_free(inner);
             return 1;
+
+        case NODE_FOR: {
+            Scope *for_scope = scope_new(scope);
+            if (!for_scope) return 0;
+
+            if (stmt->as.for_stmt.init) {
+                if (!check_stmt(c, for_scope, stmt->as.for_stmt.init, expected_return, unsafe_depth)) {
+                    scope_free(for_scope);
+                    return 0;
+                }
+            }
+            if (stmt->as.for_stmt.cond) {
+                actual = check_expr(c, for_scope, stmt->as.for_stmt.cond, unsafe_depth);
+                if (!is_assignable(&TYPE_BOOL_VALUE, actual)) {
+                    format_type(actual, actual_buf, sizeof(actual_buf));
+                    typeck_error(c, stmt->line, stmt->col,
+                                 "for condition must be bool, got %s", actual_buf);
+                    scope_free(for_scope);
+                    return 0;
+                }
+            }
+            if (stmt->as.for_stmt.post)
+                (void)check_expr(c, for_scope, stmt->as.for_stmt.post, unsafe_depth);
+
+            Scope *body_scope = scope_new(for_scope);
+            if (!body_scope) { scope_free(for_scope); return 0; }
+            if (!check_block(c, body_scope, stmt->as.for_stmt.body, expected_return, unsafe_depth)) {
+                scope_free(body_scope);
+                scope_free(for_scope);
+                return 0;
+            }
+            scope_free(body_scope);
+            scope_free(for_scope);
+            return 1;
+        }
 
         case NODE_UNSAFE:
             inner = scope_new(scope);

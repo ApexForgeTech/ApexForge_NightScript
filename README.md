@@ -1,11 +1,42 @@
+<p align="center">
+  <img src="assets/branding/logo.svg" alt="NightScript Logo" width="300"/>
+</p>
+
+<div align="center">
+
+```
+ █████╗ ██████╗ ███████╗██╗  ██╗███████╗ ██████╗ ██████╗  ██████╗ ███████╗
+██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝
+███████║██████╔╝█████╗   ╚███╔╝ █████╗  ██║   ██║██████╔╝██║  ███╗█████╗
+██╔══██║██╔═══╝ ██╔══╝   ██╔██╗ ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝
+██║  ██║██║     ███████╗██╔╝ ██╗██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
+╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+
+███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗███████╗ ██████╗██████╗ ██╗██████╗ ████████╗
+████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝██╔════╝██╔════╝██╔══██╗██║██╔══██╗╚══██╔══╝
+██╔██╗ ██║██║██║  ███╗███████║   ██║   ███████╗██║     ██████╔╝██║██████╔╝   ██║   
+██║╚██╗██║██║██║   ██║██╔══██║   ██║   ╚════██║██║     ██╔══██╗██║██╔═══╝    ██║   
+██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ███████║╚██████╗██║  ██║██║██║        ██║   
+╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝╚═╝        ╚═╝   
+```
+
+</div>
+
+<p align="center">
+  <b>Low-level control · Native UI · Kernel-ready · No Runtime Required</b>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Stack-C%2B%2B%20%7C%20Rust%20%7C%20LLVM-007ACC?style=for-the-badge&logo=cplusplus&logoColor=white">
+  <img src="https://img.shields.io/badge/Focus-Kernel%20%7C%20OS%20%7C%20Drivers-0d0d0d?style=for-the-badge">
+  <img src="https://img.shields.io/badge/UI-Native%20%7C%20Declarative-7000FF?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Safety-Explicit%20%7C%20Modern-059669?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Targets-Linux%20%7C%20Win%20%7C%20Kernel-dc2626?style=for-the-badge">
+</p>
+
 # ApexForge NightScript (AFNS)
 
 > Low-level like C. Modern like Rust. Explicit like Zig. Simple like Odin. UI-native like Flutter. OS-integrated like TempleOS.
-
----
-
-# ApexForge NightScript
-
 **ApexForge NightScript (AFNS)** is a next-generation low-level systems programming language designed for:
 
 - Operating system development

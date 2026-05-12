@@ -728,6 +728,35 @@ static int analyze_stmt(Analyzer *a, Scope *scope, Node *stmt, int loop_depth) {
             return ok;
         }
 
+        case NODE_FOR: {
+            Scope *for_scope = scope_new(scope);
+            int ok = 1;
+
+            if (!for_scope) {
+                sema_error(a, stmt->line, stmt->col, "out of memory");
+                return 0;
+            }
+
+            if (stmt->as.for_stmt.init) {
+                ok = analyze_stmt(a, for_scope, stmt->as.for_stmt.init, loop_depth);
+            }
+            if (ok && stmt->as.for_stmt.cond)
+                ok = analyze_expr(a, for_scope, stmt->as.for_stmt.cond);
+            if (ok && stmt->as.for_stmt.post)
+                ok = analyze_expr(a, for_scope, stmt->as.for_stmt.post);
+            if (ok) {
+                Scope *body_scope = scope_new(for_scope);
+                if (!body_scope) {
+                    scope_free(for_scope);
+                    return 0;
+                }
+                ok = analyze_block(a, body_scope, stmt->as.for_stmt.body, loop_depth + 1);
+                scope_free(body_scope);
+            }
+            scope_free(for_scope);
+            return ok;
+        }
+
         case NODE_BREAK:
             if (loop_depth <= 0) {
                 sema_error(a, stmt->line, stmt->col,

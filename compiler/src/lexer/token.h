@@ -4,12 +4,12 @@
 typedef enum {
     /* keywords */
     TOK_PACKAGE, TOK_IMPORT, TOK_PUB, TOK_FN, TOK_LET, TOK_CONST,
-    TOK_RETURN, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_LOOP,
+    TOK_RETURN, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_LOOP, TOK_FOR,
     TOK_BREAK, TOK_CONTINUE,
     TOK_STRUCT, TOK_ENUM, TOK_UNION, TOK_INTERFACE, TOK_IMPL,
     TOK_UNSAFE, TOK_EXTERN, TOK_AS, TOK_MATCH,
     TOK_KERNEL, TOK_NATIVE, TOK_UI, TOK_ANDROID, TOK_DRIVER,
-    TOK_APP, TOK_MODULE, TOK_DEFER, TOK_COMPTIME,
+    TOK_APP, TOK_MODULE, TOK_DEFER, TOK_COMPTIME, TOK_PACKED,
     TOK_TRUE, TOK_FALSE, TOK_NULL, TOK_SELF, TOK_UNDERSCORE,
 
     /* identifiers and literals */
@@ -53,6 +53,10 @@ typedef enum {
     TOK_BANG,      /* ! */
     TOK_QUESTION,  /* ? */
     TOK_AT,        /* @ */
+    TOK_LSHIFT,    /* << */
+    TOK_RSHIFT,    /* >> */
+    TOK_PLUSPLUS,  /* ++ */
+    TOK_MINUSMINUS,/* -- */
 
     /* compound assignment */
     TOK_PLUS_EQ,    /* += */

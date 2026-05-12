@@ -1,0 +1,33 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+enum Event {
+    Click(x: i32, y: i32);
+    Key(code: u32);
+    None;
+}
+
+fn describe(c: Color) -> i32 {
+    return match c {
+        Color.Red   => 1,
+        Color.Green => 2,
+        Color.Blue  => 3,
+        _           => 0,
+    };
+}
+
+fn main() -> i32 {
+    let c: Color = Color.Green;
+    let r: i32 = describe(c);
+    if r == 2 {
+        puts("ok");
+    }
+    return 0;
+}
