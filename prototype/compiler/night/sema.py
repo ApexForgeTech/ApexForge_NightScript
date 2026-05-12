@@ -12,6 +12,9 @@ class FunctionSymbol:
     name: str
     decl: ast.FunctionDecl | ast.ExternFunctionDecl
     type_ref: typesys.FunctionType
+    c_name: str
+    owner_type: str | None = None
+    receiver_type: typesys.Type | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,11 +25,28 @@ class StructSymbol:
 
 
 @dataclass(frozen=True, slots=True)
+class EnumSymbol:
+    name: str
+    decl: ast.EnumDecl
+    type_ref: typesys.EnumType
+
+
+@dataclass(frozen=True, slots=True)
+class UnionSymbol:
+    name: str
+    decl: ast.UnionDecl
+    type_ref: typesys.UnionType
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticModel:
     package: tuple[str, ...] | None
     imports: tuple[tuple[str, ...], ...]
     functions: dict[str, FunctionSymbol]
     structs: dict[str, StructSymbol]
+    enums: dict[str, EnumSymbol]
+    unions: dict[str, UnionSymbol]
+    methods: dict[tuple[str, str], FunctionSymbol]
 
 
 class Scope:
@@ -54,6 +74,9 @@ class SemanticAnalyzer:
         self.source_name = source_name
         self.functions: dict[str, FunctionSymbol] = {}
         self.structs: dict[str, StructSymbol] = {}
+        self.enums: dict[str, EnumSymbol] = {}
+        self.unions: dict[str, UnionSymbol] = {}
+        self.methods: dict[tuple[str, str], FunctionSymbol] = {}
 
     def analyze(self, program: ast.Program) -> SemanticModel:
         for import_decl in program.imports:
@@ -63,19 +86,33 @@ class SemanticAnalyzer:
         for decl in program.declarations:
             if isinstance(decl, ast.StructDecl):
                 self._register_struct(decl)
-
-        for decl in program.declarations:
-            if isinstance(decl, ast.FunctionDecl | ast.ExternFunctionDecl):
-                self._register_function(decl)
-            elif not isinstance(decl, ast.StructDecl):
-                raise self._error(0, 0, f"unsupported declaration: {type(decl).__name__}")
+            elif isinstance(decl, ast.EnumDecl):
+                self._register_enum(decl)
+            elif isinstance(decl, ast.UnionDecl):
+                self._register_union(decl)
 
         for decl in program.declarations:
             if isinstance(decl, ast.StructDecl):
                 self._validate_struct_decl(decl)
-            else:
-                if isinstance(decl, ast.FunctionDecl):
-                    self._analyze_function_body(decl)
+            elif isinstance(decl, ast.EnumDecl):
+                self._validate_enum_decl(decl)
+            elif isinstance(decl, ast.UnionDecl):
+                self._validate_union_decl(decl)
+
+        for decl in program.declarations:
+            if isinstance(decl, ast.FunctionDecl | ast.ExternFunctionDecl):
+                self._register_function(decl)
+            elif isinstance(decl, ast.ImplDecl):
+                self._register_impl(decl)
+            elif not isinstance(decl, ast.StructDecl | ast.EnumDecl | ast.UnionDecl):
+                raise self._error(0, 0, f"unsupported declaration: {type(decl).__name__}")
+
+        for decl in program.declarations:
+            if isinstance(decl, ast.FunctionDecl):
+                self._analyze_function_body(decl)
+            elif isinstance(decl, ast.ImplDecl):
+                for method in decl.methods:
+                    self._analyze_function_body(method)
 
         package = tuple(program.package.path) if program.package is not None else None
         imports = tuple(tuple(import_decl.path) for import_decl in program.imports)
@@ -84,6 +121,9 @@ class SemanticAnalyzer:
             imports=imports,
             functions=dict(self.functions),
             structs=dict(self.structs),
+            enums=dict(self.enums),
+            unions=dict(self.unions),
+            methods=dict(self.methods),
         )
 
     def _register_struct(self, decl: ast.StructDecl) -> None:
@@ -120,6 +160,68 @@ class SemanticAnalyzer:
             type_ref=typesys.StructType(name=decl.name, fields=tuple(fields)),
         )
 
+    def _register_enum(self, decl: ast.EnumDecl) -> None:
+        if decl.name in self.enums:
+            previous = self.enums[decl.name].decl
+            raise self._error(
+                decl.line,
+                decl.column,
+                f"duplicate enum '{decl.name}' (previous declaration at {previous.line}:{previous.column})",
+            )
+        self.enums[decl.name] = EnumSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=typesys.EnumType(name=decl.name, variants=()),
+        )
+
+    def _validate_enum_decl(self, decl: ast.EnumDecl) -> None:
+        variants: list[typesys.EnumVariant] = []
+        seen_variants: set[str] = set()
+        for index, variant in enumerate(decl.variants):
+            if variant.name in seen_variants:
+                raise self._error(variant.line, variant.column, f"duplicate enum variant '{variant.name}'")
+            seen_variants.add(variant.name)
+            variants.append(typesys.EnumVariant(name=variant.name, value=index))
+        self.enums[decl.name] = EnumSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=typesys.EnumType(name=decl.name, variants=tuple(variants)),
+        )
+
+    def _register_union(self, decl: ast.UnionDecl) -> None:
+        if decl.name in self.unions:
+            previous = self.unions[decl.name].decl
+            raise self._error(
+                decl.line,
+                decl.column,
+                f"duplicate union '{decl.name}' (previous declaration at {previous.line}:{previous.column})",
+            )
+        self.unions[decl.name] = UnionSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=typesys.UnionType(name=decl.name, fields=()),
+        )
+
+    def _validate_union_decl(self, decl: ast.UnionDecl) -> None:
+        fields: list[typesys.UnionField] = []
+        seen_fields: set[str] = set()
+        for field in decl.fields:
+            if field.name in seen_fields:
+                raise self._error(field.line, field.column, f"duplicate union field '{field.name}'")
+            seen_fields.add(field.name)
+            self._validate_type_ref(field.type_ref)
+            fields.append(
+                typesys.UnionField(
+                    name=field.name,
+                    type_ref=self._resolve_type_ref(field.type_ref),
+                )
+            )
+        self.unions[decl.name] = UnionSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=typesys.UnionType(name=decl.name, fields=tuple(fields)),
+        )
+
     def _register_function(self, decl: ast.FunctionDecl | ast.ExternFunctionDecl) -> None:
         if decl.name in self.functions:
             previous = self.functions[decl.name].decl
@@ -144,7 +246,62 @@ class SemanticAnalyzer:
             return_type=self._resolve_type_ref(decl.return_type),
             calling_convention=getattr(decl, "calling_convention", None),
         )
-        self.functions[decl.name] = FunctionSymbol(name=decl.name, decl=decl, type_ref=signature)
+        self.functions[decl.name] = FunctionSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=signature,
+            c_name=decl.name,
+        )
+
+    def _register_impl(self, decl: ast.ImplDecl) -> None:
+        if decl.target_type not in self.structs:
+            raise self._error(decl.line, decl.column, f"unknown impl target '{decl.target_type}'")
+        for method in decl.methods:
+            self._register_method(decl.target_type, method)
+
+    def _register_method(self, owner_type: str, decl: ast.FunctionDecl) -> None:
+        method_key = (owner_type, decl.name)
+        if method_key in self.methods:
+            previous = self.methods[method_key].decl
+            raise self._error(
+                decl.line,
+                decl.column,
+                f"duplicate method '{owner_type}.{decl.name}' (previous declaration at {previous.line}:{previous.column})",
+            )
+
+        self._validate_type_ref(decl.return_type)
+        param_types: list[typesys.Type] = []
+        seen_params: set[str] = set()
+        receiver_type: typesys.Type | None = None
+        for index, param in enumerate(decl.params):
+            if param.name in seen_params:
+                raise self._error(param.line, param.column, f"duplicate parameter '{param.name}'")
+            seen_params.add(param.name)
+            self._validate_type_ref(param.type_ref)
+            resolved = self._resolve_type_ref(param.type_ref)
+            if index == 0 and param.name == "self":
+                receiver_type = resolved
+                if not self._is_valid_receiver_type(owner_type, resolved):
+                    raise self._error(
+                        param.line,
+                        param.column,
+                        f"self parameter for '{owner_type}.{decl.name}' must be {owner_type} or *{owner_type}",
+                    )
+            param_types.append(resolved)
+
+        signature = typesys.FunctionType(
+            param_types=tuple(param_types),
+            return_type=self._resolve_type_ref(decl.return_type),
+            calling_convention=None,
+        )
+        self.methods[method_key] = FunctionSymbol(
+            name=decl.name,
+            decl=decl,
+            type_ref=signature,
+            c_name=f"{owner_type}_{decl.name}",
+            owner_type=owner_type,
+            receiver_type=receiver_type,
+        )
 
     def _analyze_function_body(self, decl: ast.FunctionDecl) -> None:
         scope = Scope()
@@ -193,6 +350,10 @@ class SemanticAnalyzer:
 
         if isinstance(stmt, ast.LoopStmt):
             self._analyze_block(stmt.body, Scope(parent=scope), loop_depth=loop_depth + 1)
+            return
+
+        if isinstance(stmt, ast.UnsafeStmt):
+            self._analyze_block(stmt.body, Scope(parent=scope), loop_depth=loop_depth)
             return
 
         if isinstance(stmt, ast.BreakStmt | ast.ContinueStmt):
@@ -255,18 +416,28 @@ class SemanticAnalyzer:
             return
 
         if isinstance(expr, ast.FieldAccessExpr):
+            if isinstance(expr.object, ast.IdentifierExpr) and (
+                expr.object.name in self.structs or expr.object.name in self.enums or expr.object.name in self.unions
+            ):
+                return
             self._analyze_expr(expr.object, scope)
             return
 
         if isinstance(expr, ast.StructLiteralExpr):
-            if expr.type_name not in self.structs:
-                raise self._error(expr.line, expr.column, f"unknown struct '{expr.type_name}'")
-            seen_fields: set[str] = set()
-            for field in expr.fields:
-                if field.name in seen_fields:
-                    raise self._error(field.line, field.column, f"duplicate struct literal field '{field.name}'")
-                seen_fields.add(field.name)
-                self._analyze_expr(field.value, scope)
+            if expr.type_name in self.structs or expr.type_name in self.unions:
+                seen_fields: set[str] = set()
+                for field in expr.fields:
+                    if field.name in seen_fields:
+                        raise self._error(field.line, field.column, f"duplicate struct literal field '{field.name}'")
+                    seen_fields.add(field.name)
+                    self._analyze_expr(field.value, scope)
+                return
+            raise self._error(expr.line, expr.column, f"unknown composite type '{expr.type_name}'")
+
+        if isinstance(expr, ast.MatchExpr):
+            self._analyze_expr(expr.subject, scope)
+            for arm in expr.arms:
+                self._analyze_expr(arm.value, scope)
             return
 
         raise self._error(getattr(expr, "line", 0), getattr(expr, "column", 0), f"unsupported expression: {type(expr).__name__}")
@@ -276,7 +447,12 @@ class SemanticAnalyzer:
             if len(type_ref.path) != 1:
                 raise self._error(type_ref.line, type_ref.column, f"unknown type '{'.'.join(type_ref.path)}'")
             name = type_ref.path[0]
-            if name not in typesys.BUILTINS and name not in self.structs:
+            if (
+                name not in typesys.BUILTINS
+                and name not in self.structs
+                and name not in self.enums
+                and name not in self.unions
+            ):
                 raise self._error(type_ref.line, type_ref.column, f"unknown type '{name}'")
             return
 
@@ -294,7 +470,11 @@ class SemanticAnalyzer:
         if isinstance(type_ref, ast.NamedType):
             if type_ref.path[0] in typesys.BUILTINS:
                 return typesys.BUILTINS[type_ref.path[0]]
-            return self.structs[type_ref.path[0]].type_ref
+            if type_ref.path[0] in self.structs:
+                return self.structs[type_ref.path[0]].type_ref
+            if type_ref.path[0] in self.enums:
+                return self.enums[type_ref.path[0]].type_ref
+            return self.unions[type_ref.path[0]].type_ref
         if isinstance(type_ref, ast.PointerType):
             return typesys.PointerType(
                 inner=self._resolve_type_ref(type_ref.inner),
@@ -310,6 +490,15 @@ class SemanticAnalyzer:
 
     def _error(self, line: int, column: int, message: str) -> SemanticError:
         return SemanticError(message=message, line=line, column=column, source_name=self.source_name)
+
+    def _is_valid_receiver_type(self, owner_type: str, receiver_type: typesys.Type) -> bool:
+        owner_struct = self.structs[owner_type].type_ref
+        if receiver_type == owner_struct:
+            return True
+        return (
+            isinstance(receiver_type, typesys.PointerType)
+            and receiver_type.inner == owner_struct
+        )
 
 
 def analyze(program: ast.Program, source_name: str = "<memory>") -> SemanticModel:

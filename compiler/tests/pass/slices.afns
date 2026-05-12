@@ -1,0 +1,17 @@
+struct Buffer {
+    data: []u8;
+}
+
+fn size(buf: Buffer) -> usize {
+    return buf.data.len;
+}
+
+fn raw(data: []u8) -> *u8 {
+    return data.ptr;
+}
+
+fn main() -> i32 {
+    let bytes: [4]u8;
+    let view: []u8;
+    return 0;
+}

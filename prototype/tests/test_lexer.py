@@ -177,6 +177,105 @@ fn main() -> i32 {
     assert fn_decl.body.statements[1].value.field == "x"
 
 
+def test_parser_builds_impl_ast() -> None:
+    program = parse(
+        """
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn new() -> Counter {
+        return Counter { value: 0 };
+    }
+
+    fn increment(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+}
+"""
+    )
+
+    impl_decl = program.declarations[1]
+    assert impl_decl.target_type == "Counter"
+    assert impl_decl.methods[0].name == "new"
+    assert impl_decl.methods[1].params[0].name == "self"
+
+
+def test_parser_builds_enum_ast() -> None:
+    program = parse(
+        """
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+fn main() -> i32 {
+    let color: Color = Color.Red;
+    return 0;
+}
+"""
+    )
+
+    enum_decl = program.declarations[0]
+    fn_decl = program.declarations[1]
+    assert enum_decl.name == "Color"
+    assert [variant.name for variant in enum_decl.variants] == ["Red", "Green", "Blue"]
+    assert fn_decl.body.statements[0].type_ref.path == ["Color"]
+
+
+def test_parser_builds_union_ast() -> None:
+    program = parse(
+        """
+union Register {
+    value: i32;
+    raw: u32;
+}
+
+fn main() -> i32 {
+    let reg: Register = Register { value: 1 };
+    unsafe {
+        reg.raw = 2;
+    }
+    return 0;
+}
+"""
+    )
+
+    union_decl = program.declarations[0]
+    fn_decl = program.declarations[1]
+    assert union_decl.name == "Register"
+    assert union_decl.fields[0].name == "value"
+    assert fn_decl.body.statements[1].__class__.__name__ == "UnsafeStmt"
+
+
+def test_parser_builds_match_expr_ast() -> None:
+    program = parse(
+        """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    let code: i32 = match mode {
+        Mode.Off => 1,
+        Mode.On => 0,
+    };
+    return code;
+}
+"""
+    )
+
+    fn_decl = program.declarations[1]
+    match_expr = fn_decl.body.statements[1].value
+    assert match_expr.subject.name == "mode"
+    assert match_expr.arms[0].pattern.variant_name == "Off"
+    assert match_expr.arms[1].value.value == 0
+
+
 def test_cli_parse_smoke(tmp_path: Path, capsys) -> None:
     source_file = tmp_path / "hello.afns"
     source_file.write_text("fn main() -> i32 { return 0; }\n", encoding="utf-8")
@@ -306,6 +405,188 @@ fn main() -> i32 {
         raise AssertionError("expected TypeCheckError")
 
 
+def test_check_accepts_impl_methods() -> None:
+    result = check_source(
+        """
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn new() -> Counter {
+        return Counter { value: 0 };
+    }
+
+    fn increment(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() -> i32 {
+    let counter = Counter.new();
+    counter.increment();
+    return counter.value;
+}
+"""
+    )
+
+    assert ("Counter", "new") in result.semantic_model.methods
+    assert ("Counter", "increment") in result.semantic_model.methods
+
+
+def test_check_accepts_simple_enum() -> None:
+    result = check_source(
+        """
+enum Color {
+    Red;
+    Green;
+}
+
+fn main() -> i32 {
+    let color: Color = Color.Red;
+    if color == Color.Green {
+        return 1;
+    }
+    return 0;
+}
+"""
+    )
+
+    assert "Color" in result.semantic_model.enums
+
+
+def test_check_reports_unknown_enum_variant() -> None:
+    try:
+        check_source(
+            """
+enum Color {
+    Red;
+}
+
+fn main() -> i32 {
+    let color: Color = Color.Blue;
+    return 0;
+}
+"""
+        )
+    except TypeCheckError as exc:
+        assert "unknown variant 'Blue' for enum 'Color'" in str(exc)
+    else:
+        raise AssertionError("expected TypeCheckError")
+
+
+def test_check_accepts_union_inside_unsafe() -> None:
+    result = check_source(
+        """
+union Register {
+    value: i32;
+    raw: u32;
+}
+
+fn main() -> i32 {
+    let reg: Register = Register { value: 7 };
+    unsafe {
+        reg.raw = 9;
+        return reg.value;
+    }
+}
+"""
+    )
+
+    assert "Register" in result.semantic_model.unions
+
+
+def test_check_reports_union_access_outside_unsafe() -> None:
+    try:
+        check_source(
+            """
+union Register {
+    value: i32;
+    raw: u32;
+}
+
+fn main() -> i32 {
+    let reg: Register = Register { value: 7 };
+    return reg.raw;
+}
+"""
+        )
+    except TypeCheckError as exc:
+        assert "union field access requires unsafe block" in str(exc)
+    else:
+        raise AssertionError("expected TypeCheckError")
+
+
+def test_check_accepts_match_expr() -> None:
+    result = check_source(
+        """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    return match mode {
+        Mode.Off => 1,
+        Mode.On => 0,
+    };
+}
+"""
+    )
+
+    assert "Mode" in result.semantic_model.enums
+
+
+def test_check_reports_non_exhaustive_match() -> None:
+    try:
+        check_source(
+            """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    return match mode {
+        Mode.Off => 1,
+    };
+}
+"""
+        )
+    except TypeCheckError as exc:
+        assert "non-exhaustive match" in str(exc)
+    else:
+        raise AssertionError("expected TypeCheckError")
+
+
+def test_check_reports_method_called_on_type_without_instance() -> None:
+    try:
+        check_source(
+            """
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn increment(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() -> i32 {
+    Counter.increment();
+    return 0;
+}
+"""
+        )
+    except TypeCheckError as exc:
+        assert "requires an instance" in str(exc)
+    else:
+        raise AssertionError("expected TypeCheckError")
+
+
 def test_cli_check_smoke(tmp_path: Path, capsys) -> None:
     source_file = tmp_path / "hello.afns"
     source_file.write_text(
@@ -371,6 +652,130 @@ fn main() -> i32 {
     assert exit_code == 0
     assert "typedef struct Point {" in output
     assert "Point point = (Point){ .x = 3, .y = 4 };" in output
+
+
+def test_cli_codegen_impl_smoke(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "counter.afns"
+    source_file.write_text(
+        """
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn new() -> Counter {
+        return Counter { value: 0 };
+    }
+
+    fn increment(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() -> i32 {
+    let counter = Counter.new();
+    counter.increment();
+    return counter.value;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["codegen", str(source_file)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Counter Counter_new(void);" in output
+    assert "void Counter_increment(Counter* self);" in output
+    assert "counter = Counter_new();" in output
+    assert "Counter_increment(&(counter));" in output
+
+
+def test_cli_codegen_enum_smoke(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "color.afns"
+    source_file.write_text(
+        """
+enum Color {
+    Red;
+    Green;
+}
+
+fn main() -> i32 {
+    let color: Color = Color.Red;
+    if color == Color.Green {
+        return 1;
+    }
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["codegen", str(source_file)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "typedef enum Color {" in output
+    assert "Color_Red = 0" in output
+    assert "Color color = Color_Red;" in output
+
+
+def test_cli_codegen_union_smoke(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "register.afns"
+    source_file.write_text(
+        """
+union Register {
+    value: i32;
+    raw: u32;
+}
+
+fn main() -> i32 {
+    let reg: Register = Register { value: 7 };
+    unsafe {
+        reg.raw = 9;
+        return reg.value;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["codegen", str(source_file)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "typedef union Register {" in output
+    assert "Register reg = (Register){ .value = 7 };" in output
+
+
+def test_cli_codegen_match_smoke(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "match.afns"
+    source_file.write_text(
+        """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    let code: i32 = match mode {
+        Mode.Off => 1,
+        Mode.On => 0,
+    };
+    return code;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["codegen", str(source_file)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "switch (mode)" in output
+    assert "case Mode_Off:" in output
+    assert "code = 1;" in output
 
 
 def test_cli_build_smoke(tmp_path: Path, capsys) -> None:
@@ -459,6 +864,135 @@ fn main() -> i32 {
         return 0;
     }
     return 1;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["build", str(source_file), "-o", str(binary_file)])
+    _ = capsys.readouterr().out
+
+    assert exit_code == 0
+    run = subprocess.run([str(binary_file)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0
+
+
+def test_cli_build_impl_program(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "impl.afns"
+    binary_file = tmp_path / "impl-bin"
+    source_file.write_text(
+        """
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn new() -> Counter {
+        return Counter { value: 0 };
+    }
+
+    fn increment(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() -> i32 {
+    let counter = Counter.new();
+    counter.increment();
+    counter.increment();
+    if counter.value == 2 {
+        return 0;
+    }
+    return 1;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["build", str(source_file), "-o", str(binary_file)])
+    _ = capsys.readouterr().out
+
+    assert exit_code == 0
+    run = subprocess.run([str(binary_file)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0
+
+
+def test_cli_build_enum_program(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "enum.afns"
+    binary_file = tmp_path / "enum-bin"
+    source_file.write_text(
+        """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    if mode == Mode.On {
+        return 0;
+    }
+    return 1;
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["build", str(source_file), "-o", str(binary_file)])
+    _ = capsys.readouterr().out
+
+    assert exit_code == 0
+    run = subprocess.run([str(binary_file)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0
+
+
+def test_cli_build_union_program(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "union.afns"
+    binary_file = tmp_path / "union-bin"
+    source_file.write_text(
+        """
+union Register {
+    value: i32;
+    raw: u32;
+}
+
+fn main() -> i32 {
+    let reg: Register = Register { value: 5 };
+    unsafe {
+        reg.raw = 0;
+        reg.value = 0;
+        return reg.value;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["build", str(source_file), "-o", str(binary_file)])
+    _ = capsys.readouterr().out
+
+    assert exit_code == 0
+    run = subprocess.run([str(binary_file)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0
+
+
+def test_cli_build_match_program(tmp_path: Path, capsys) -> None:
+    source_file = tmp_path / "match.afns"
+    binary_file = tmp_path / "match-bin"
+    source_file.write_text(
+        """
+enum Mode {
+    Off;
+    On;
+}
+
+fn main() -> i32 {
+    let mode: Mode = Mode.On;
+    let code: i32 = match mode {
+        Mode.Off => 1,
+        Mode.On => 0,
+    };
+    return code;
 }
 """,
         encoding="utf-8",

@@ -33,6 +33,32 @@ class Decl(Node):
 
 
 @dataclass(frozen=True, slots=True)
+class ImplDecl(Decl):
+    target_type: str
+    methods: list[FunctionDecl]
+    line: int = 0
+    column: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class EnumDecl(Decl):
+    name: str
+    variants: list[EnumVariantDecl]
+    is_public: bool = False
+    line: int = 0
+    column: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class UnionDecl(Decl):
+    name: str
+    fields: list[FieldDecl]
+    is_public: bool = False
+    line: int = 0
+    column: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class StructDecl(Decl):
     name: str
     fields: list[FieldDecl]
@@ -48,6 +74,7 @@ class FunctionDecl(Decl):
     return_type: TypeRef
     body: BlockStmt
     is_public: bool = False
+    owner_type: str | None = None
     line: int = 0
     column: int = 0
 
@@ -75,6 +102,13 @@ class Param(Node):
 class FieldDecl(Node):
     name: str
     type_ref: TypeRef
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class EnumVariantDecl(Node):
+    name: str
     line: int
     column: int
 
@@ -155,6 +189,13 @@ class WhileStmt(Stmt):
 
 @dataclass(frozen=True, slots=True)
 class LoopStmt(Stmt):
+    body: BlockStmt
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnsafeStmt(Stmt):
     body: BlockStmt
     line: int
     column: int
@@ -272,6 +313,40 @@ class FieldInit(Node):
 class StructLiteralExpr(Expr):
     type_name: str
     fields: list[FieldInit]
+    line: int
+    column: int
+
+
+class MatchPattern(Node):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class EnumVariantPattern(MatchPattern):
+    enum_name: str
+    variant_name: str
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class WildcardPattern(MatchPattern):
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class MatchArm(Node):
+    pattern: MatchPattern
+    value: Expr
+    line: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class MatchExpr(Expr):
+    subject: Expr
+    arms: list[MatchArm]
     line: int
     column: int
 

@@ -36,6 +36,7 @@ SINGLE_CHAR_TOKENS = {
 
 DOUBLE_CHAR_TOKENS = {
     "->": TokenKind.ARROW,
+    "=>": TokenKind.FAT_ARROW,
     "==": TokenKind.EQEQ,
     "!=": TokenKind.NE,
     "<=": TokenKind.LE,

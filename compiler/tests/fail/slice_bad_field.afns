@@ -1,0 +1,4 @@
+fn main() -> usize {
+    let data: []u8;
+    return data.cap;
+}

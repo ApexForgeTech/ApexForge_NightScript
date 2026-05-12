@@ -45,6 +45,30 @@ class StructType(Type):
 
 
 @dataclass(frozen=True, slots=True)
+class UnionField:
+    name: str
+    type_ref: Type
+
+
+@dataclass(frozen=True, slots=True)
+class UnionType(Type):
+    name: str
+    fields: tuple[UnionField, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EnumVariant:
+    name: str
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
+class EnumType(Type):
+    name: str
+    variants: tuple[EnumVariant, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LiteralIntType(Type):
     pass
 
@@ -132,6 +156,10 @@ def describe(type_ref: Type) -> str:
         return f"fn({params}) -> {describe(type_ref.return_type)}"
     if isinstance(type_ref, StructType):
         return type_ref.name
+    if isinstance(type_ref, UnionType):
+        return type_ref.name
+    if isinstance(type_ref, EnumType):
+        return type_ref.name
     if isinstance(type_ref, LiteralIntType):
         return "<int literal>"
     if isinstance(type_ref, LiteralFloatType):
@@ -182,6 +210,12 @@ def is_assignable(expected: Type, actual: Type) -> bool:
         return expected.length == actual.length and is_assignable(expected.element_type, actual.element_type)
 
     if isinstance(expected, StructType) and isinstance(actual, StructType):
+        return expected.name == actual.name
+
+    if isinstance(expected, UnionType) and isinstance(actual, UnionType):
+        return expected.name == actual.name
+
+    if isinstance(expected, EnumType) and isinstance(actual, EnumType):
         return expected.name == actual.name
 
     return False

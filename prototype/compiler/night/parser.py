@@ -46,6 +46,15 @@ class Parser:
     def _parse_declaration(self) -> ast.Decl:
         is_public = self._match(TokenKind.PUB)
 
+        if self._match(TokenKind.IMPL):
+            return self._parse_impl_decl()
+
+        if self._match(TokenKind.ENUM):
+            return self._parse_enum_decl(is_public=is_public)
+
+        if self._match(TokenKind.UNION):
+            return self._parse_union_decl(is_public=is_public)
+
         if self._match(TokenKind.STRUCT):
             return self._parse_struct_decl(is_public=is_public)
 
@@ -57,6 +66,63 @@ class Parser:
 
         token = self._current()
         raise self._error(token, f"unexpected top-level token {token.kind.value}")
+
+    def _parse_impl_decl(self) -> ast.ImplDecl:
+        impl_token = self._previous()
+        target = self._expect(TokenKind.IDENTIFIER, "expected type name after impl")
+        self._expect(TokenKind.LBRACE, "expected '{' after impl target")
+        methods: list[ast.FunctionDecl] = []
+        while not self._check(TokenKind.RBRACE):
+            is_public = self._match(TokenKind.PUB)
+            self._expect(TokenKind.FN, "expected 'fn' inside impl block")
+            methods.append(self._parse_function_decl(is_public=is_public, owner_type=target.lexeme))
+        self._expect(TokenKind.RBRACE, "expected '}' after impl block")
+        return ast.ImplDecl(target_type=target.lexeme, methods=methods, line=impl_token.line, column=impl_token.column)
+
+    def _parse_enum_decl(self, is_public: bool) -> ast.EnumDecl:
+        enum_token = self._previous()
+        name_token = self._expect(TokenKind.IDENTIFIER, "expected enum name")
+        self._expect(TokenKind.LBRACE, "expected '{' after enum name")
+        variants: list[ast.EnumVariantDecl] = []
+        while not self._check(TokenKind.RBRACE):
+            variant = self._expect(TokenKind.IDENTIFIER, "expected enum variant name")
+            self._expect(TokenKind.SEMICOLON, "expected ';' after enum variant")
+            variants.append(ast.EnumVariantDecl(name=variant.lexeme, line=variant.line, column=variant.column))
+        self._expect(TokenKind.RBRACE, "expected '}' after enum body")
+        return ast.EnumDecl(
+            name=name_token.lexeme,
+            variants=variants,
+            is_public=is_public,
+            line=enum_token.line,
+            column=enum_token.column,
+        )
+
+    def _parse_union_decl(self, is_public: bool) -> ast.UnionDecl:
+        union_token = self._previous()
+        name_token = self._expect(TokenKind.IDENTIFIER, "expected union name")
+        self._expect(TokenKind.LBRACE, "expected '{' after union name")
+        fields: list[ast.FieldDecl] = []
+        while not self._check(TokenKind.RBRACE):
+            field_name = self._expect(TokenKind.IDENTIFIER, "expected union field name")
+            self._expect(TokenKind.COLON, "expected ':' after union field name")
+            field_type = self._parse_type()
+            self._expect(TokenKind.SEMICOLON, "expected ';' after union field")
+            fields.append(
+                ast.FieldDecl(
+                    name=field_name.lexeme,
+                    type_ref=field_type,
+                    line=field_name.line,
+                    column=field_name.column,
+                )
+            )
+        self._expect(TokenKind.RBRACE, "expected '}' after union body")
+        return ast.UnionDecl(
+            name=name_token.lexeme,
+            fields=fields,
+            is_public=is_public,
+            line=union_token.line,
+            column=union_token.column,
+        )
 
     def _parse_struct_decl(self, is_public: bool) -> ast.StructDecl:
         struct_token = self._previous()
@@ -110,7 +176,7 @@ class Parser:
             column=extern_token.column,
         )
 
-    def _parse_function_decl(self, is_public: bool) -> ast.FunctionDecl:
+    def _parse_function_decl(self, is_public: bool, owner_type: str | None = None) -> ast.FunctionDecl:
         fn_token = self._previous()
         name_token = self._expect(TokenKind.IDENTIFIER, "expected function name")
         params = self._parse_params()
@@ -123,6 +189,7 @@ class Parser:
             return_type=return_type,
             body=body,
             is_public=is_public,
+            owner_type=owner_type,
             line=fn_token.line,
             column=fn_token.column,
         )
@@ -213,6 +280,8 @@ class Parser:
             return self._parse_while_stmt()
         if self._match(TokenKind.LOOP):
             return self._parse_loop_stmt()
+        if self._match(TokenKind.UNSAFE):
+            return self._parse_unsafe_stmt()
         if self._match(TokenKind.BREAK):
             return self._parse_break_stmt()
         if self._match(TokenKind.CONTINUE):
@@ -286,6 +355,11 @@ class Parser:
         loop_token = self._previous()
         body = self._parse_block()
         return ast.LoopStmt(body=body, line=loop_token.line, column=loop_token.column)
+
+    def _parse_unsafe_stmt(self) -> ast.UnsafeStmt:
+        unsafe_token = self._previous()
+        body = self._parse_block()
+        return ast.UnsafeStmt(body=body, line=unsafe_token.line, column=unsafe_token.column)
 
     def _parse_break_stmt(self) -> ast.BreakStmt:
         break_token = self._previous()
@@ -384,6 +458,9 @@ class Parser:
         return expr
 
     def _parse_primary(self) -> ast.Expr:
+        if self._match(TokenKind.MATCH):
+            return self._parse_match_expr()
+
         if self._match(TokenKind.INTEGER, TokenKind.FLOAT, TokenKind.STRING, TokenKind.CHAR):
             token = self._previous()
             return ast.LiteralExpr(value=token.literal, line=token.line, column=token.column)
@@ -433,6 +510,34 @@ class Parser:
             fields=fields,
             line=type_token.line,
             column=type_token.column,
+        )
+
+    def _parse_match_expr(self) -> ast.MatchExpr:
+        match_token = self._previous()
+        subject = self._parse_expression()
+        self._expect(TokenKind.LBRACE, "expected '{' after match subject")
+        arms: list[ast.MatchArm] = []
+        while not self._check(TokenKind.RBRACE):
+            pattern = self._parse_match_pattern()
+            self._expect(TokenKind.FAT_ARROW, "expected '=>' in match arm")
+            value = self._parse_expression()
+            arms.append(ast.MatchArm(pattern=pattern, value=value, line=pattern.line, column=pattern.column))
+            self._match(TokenKind.COMMA)
+        self._expect(TokenKind.RBRACE, "expected '}' after match arms")
+        return ast.MatchExpr(subject=subject, arms=arms, line=match_token.line, column=match_token.column)
+
+    def _parse_match_pattern(self) -> ast.MatchPattern:
+        if self._match(TokenKind.UNDERSCORE):
+            token = self._previous()
+            return ast.WildcardPattern(line=token.line, column=token.column)
+        enum_name = self._expect(TokenKind.IDENTIFIER, "expected enum name or '_' in match pattern")
+        self._expect(TokenKind.DOT, "expected '.' in enum variant pattern")
+        variant = self._expect(TokenKind.IDENTIFIER, "expected enum variant name in match pattern")
+        return ast.EnumVariantPattern(
+            enum_name=enum_name.lexeme,
+            variant_name=variant.lexeme,
+            line=enum_name.line,
+            column=enum_name.column,
         )
 
     def _looks_like_struct_literal(self) -> bool:

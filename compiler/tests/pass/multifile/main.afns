@@ -1,0 +1,5 @@
+package demo;
+
+fn main() -> i32 {
+    return helper();
+}

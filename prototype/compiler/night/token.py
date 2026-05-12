@@ -59,6 +59,7 @@ class TokenKind(str, Enum):
     COMMA = "COMMA"
     DOT = "DOT"
     ARROW = "ARROW"
+    FAT_ARROW = "FAT_ARROW"
     EQUAL = "EQUAL"
     PLUS = "PLUS"
     MINUS = "MINUS"

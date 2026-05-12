@@ -35,6 +35,21 @@ class CheckResult:
     functions: dict[str, typesys.FunctionType]
     expression_types: dict[int, typesys.Type]
     binding_types: dict[int, typesys.Type]
+    call_resolutions: dict[int, CallResolution]
+    match_resolutions: dict[int, MatchResolution]
+
+
+@dataclass(frozen=True, slots=True)
+class CallResolution:
+    lowered_name: str
+    receiver_strategy: str
+
+
+@dataclass(frozen=True, slots=True)
+class MatchResolution:
+    enum_name: str
+    cases: tuple[tuple[str, ast.Expr], ...]
+    default_expr: ast.Expr | None
 
 
 class TypeChecker:
@@ -43,19 +58,29 @@ class TypeChecker:
         self.source_name = source_name
         self.expression_types: dict[int, typesys.Type] = {}
         self.binding_types: dict[int, typesys.Type] = {}
+        self.call_resolutions: dict[int, CallResolution] = {}
+        self.match_resolutions: dict[int, MatchResolution] = {}
 
     def check(self, program: ast.Program) -> CheckResult:
         for decl in program.declarations:
             if isinstance(decl, ast.FunctionDecl):
                 self._check_function(decl)
+            elif isinstance(decl, ast.ImplDecl):
+                for method in decl.methods:
+                    self._check_function(method)
         return CheckResult(
             functions={name: symbol.type_ref for name, symbol in self.semantic_model.functions.items()},
             expression_types=dict(self.expression_types),
             binding_types=dict(self.binding_types),
+            call_resolutions=dict(self.call_resolutions),
+            match_resolutions=dict(self.match_resolutions),
         )
 
     def _check_function(self, decl: ast.FunctionDecl) -> None:
-        signature = self.semantic_model.functions[decl.name].type_ref
+        if decl.owner_type is None:
+            signature = self.semantic_model.functions[decl.name].type_ref
+        else:
+            signature = self.semantic_model.methods[(decl.owner_type, decl.name)].type_ref
         scope = Scope()
         for name, symbol in self.semantic_model.functions.items():
             scope.define(name, symbol.type_ref, mutable=False)
@@ -64,15 +89,15 @@ class TypeChecker:
 
         has_return = False
         for stmt in decl.body.statements:
-            stmt_return = self._check_stmt(stmt, scope, signature.return_type)
+            stmt_return = self._check_stmt(stmt, scope, signature.return_type, unsafe_depth=0)
             has_return = has_return or stmt_return
 
         if signature.return_type != typesys.VOID and not has_return:
             raise self._error(decl.line, decl.column, f"function '{decl.name}' must return {typesys.describe(signature.return_type)}")
 
-    def _check_stmt(self, stmt: ast.Stmt, scope: Scope, expected_return_type: typesys.Type) -> bool:
+    def _check_stmt(self, stmt: ast.Stmt, scope: Scope, expected_return_type: typesys.Type, unsafe_depth: int) -> bool:
         if isinstance(stmt, ast.ConstStmt):
-            value_type = self._check_expr(stmt.value, scope)
+            value_type = self._check_expr(stmt.value, scope, unsafe_depth)
             declared_type = self._resolve_type_ref(stmt.type_ref) if stmt.type_ref is not None else None
             if declared_type is not None and not typesys.is_assignable(declared_type, value_type):
                 raise self._error(
@@ -88,7 +113,7 @@ class TypeChecker:
         if isinstance(stmt, ast.LetStmt):
             value_type = None
             if stmt.value is not None:
-                value_type = self._check_expr(stmt.value, scope)
+                value_type = self._check_expr(stmt.value, scope, unsafe_depth)
             declared_type = self._resolve_type_ref(stmt.type_ref) if stmt.type_ref is not None else None
             if declared_type is None and value_type is None:
                 raise self._error(stmt.line, stmt.column, "let statement needs a type annotation or initializer")
@@ -104,42 +129,45 @@ class TypeChecker:
             return False
 
         if isinstance(stmt, ast.IfStmt):
-            condition_type = self._check_expr(stmt.condition, scope)
+            condition_type = self._check_expr(stmt.condition, scope, unsafe_depth)
             if not typesys.is_assignable(typesys.BOOL, condition_type):
                 raise self._error(
                     stmt.line,
                     stmt.column,
                     f"if condition must be bool, got {typesys.describe(condition_type)}",
                 )
-            then_returns = self._check_block(stmt.then_branch, Scope(parent=scope), expected_return_type)
+            then_returns = self._check_block(stmt.then_branch, Scope(parent=scope), expected_return_type, unsafe_depth)
             else_returns = False
             if stmt.else_branch is not None:
                 if isinstance(stmt.else_branch, ast.BlockStmt):
-                    else_returns = self._check_block(stmt.else_branch, Scope(parent=scope), expected_return_type)
+                    else_returns = self._check_block(stmt.else_branch, Scope(parent=scope), expected_return_type, unsafe_depth)
                 else:
-                    else_returns = self._check_stmt(stmt.else_branch, Scope(parent=scope), expected_return_type)
+                    else_returns = self._check_stmt(stmt.else_branch, Scope(parent=scope), expected_return_type, unsafe_depth)
             return then_returns and else_returns
 
         if isinstance(stmt, ast.WhileStmt):
-            condition_type = self._check_expr(stmt.condition, scope)
+            condition_type = self._check_expr(stmt.condition, scope, unsafe_depth)
             if not typesys.is_assignable(typesys.BOOL, condition_type):
                 raise self._error(
                     stmt.line,
                     stmt.column,
                     f"while condition must be bool, got {typesys.describe(condition_type)}",
                 )
-            self._check_block(stmt.body, Scope(parent=scope), expected_return_type)
+            self._check_block(stmt.body, Scope(parent=scope), expected_return_type, unsafe_depth)
             return False
 
         if isinstance(stmt, ast.LoopStmt):
-            self._check_block(stmt.body, Scope(parent=scope), expected_return_type)
+            self._check_block(stmt.body, Scope(parent=scope), expected_return_type, unsafe_depth)
             return False
+
+        if isinstance(stmt, ast.UnsafeStmt):
+            return self._check_block(stmt.body, Scope(parent=scope), expected_return_type, unsafe_depth + 1)
 
         if isinstance(stmt, ast.BreakStmt | ast.ContinueStmt):
             return False
 
         if isinstance(stmt, ast.ReturnStmt):
-            actual_type = typesys.VOID if stmt.value is None else self._check_expr(stmt.value, scope)
+            actual_type = typesys.VOID if stmt.value is None else self._check_expr(stmt.value, scope, unsafe_depth)
             if not typesys.is_assignable(expected_return_type, actual_type):
                 raise self._error(
                     stmt.line,
@@ -149,21 +177,21 @@ class TypeChecker:
             return True
 
         if isinstance(stmt, ast.ExprStmt):
-            self._check_expr(stmt.expr, scope)
+            self._check_expr(stmt.expr, scope, unsafe_depth)
             return False
 
         raise self._error(getattr(stmt, "line", 0), getattr(stmt, "column", 0), f"unsupported statement: {type(stmt).__name__}")
 
-    def _check_block(self, block: ast.BlockStmt, scope: Scope, expected_return_type: typesys.Type) -> bool:
+    def _check_block(self, block: ast.BlockStmt, scope: Scope, expected_return_type: typesys.Type, unsafe_depth: int) -> bool:
         definitely_returns = False
         for stmt in block.statements:
-            stmt_returns = self._check_stmt(stmt, scope, expected_return_type)
+            stmt_returns = self._check_stmt(stmt, scope, expected_return_type, unsafe_depth)
             definitely_returns = definitely_returns or stmt_returns
             if stmt_returns:
                 break
         return definitely_returns
 
-    def _check_expr(self, expr: ast.Expr, scope: Scope) -> typesys.Type:
+    def _check_expr(self, expr: ast.Expr, scope: Scope, unsafe_depth: int) -> typesys.Type:
         if isinstance(expr, ast.IdentifierExpr):
             resolved = scope.resolve(expr.name)
             if resolved is None:
@@ -191,12 +219,12 @@ class TypeChecker:
             raise self._error(expr.line, expr.column, f"unsupported literal type: {type(expr.value).__name__}")
 
         if isinstance(expr, ast.GroupExpr):
-            result = self._check_expr(expr.expr, scope)
+            result = self._check_expr(expr.expr, scope, unsafe_depth)
             self.expression_types[id(expr)] = result
             return result
 
         if isinstance(expr, ast.UnaryExpr):
-            operand_type = self._check_expr(expr.operand, scope)
+            operand_type = self._check_expr(expr.operand, scope, unsafe_depth)
             if expr.operator == "!":
                 if not typesys.is_assignable(typesys.BOOL, operand_type):
                     raise self._error(expr.line, expr.column, f"operator ! requires bool, got {typesys.describe(operand_type)}")
@@ -219,8 +247,8 @@ class TypeChecker:
             raise self._error(expr.line, expr.column, f"unsupported unary operator '{expr.operator}'")
 
         if isinstance(expr, ast.BinaryExpr):
-            left_type = self._check_expr(expr.left, scope)
-            right_type = self._check_expr(expr.right, scope)
+            left_type = self._check_expr(expr.left, scope, unsafe_depth)
+            right_type = self._check_expr(expr.right, scope, unsafe_depth)
             if expr.operator in {"+", "-", "*", "/", "%"}:
                 if not typesys.is_numeric(left_type) or not typesys.is_numeric(right_type):
                     raise self._error(
@@ -270,8 +298,8 @@ class TypeChecker:
             if not self._is_assignable_target(expr.target):
                 raise self._error(expr.line, expr.column, "left side of assignment is not assignable")
             self._ensure_mutable_target(expr.target, scope)
-            target_type = self._check_expr(expr.target, scope)
-            value_type = self._check_expr(expr.value, scope)
+            target_type = self._check_expr(expr.target, scope, unsafe_depth)
+            value_type = self._check_expr(expr.value, scope, unsafe_depth)
             if not typesys.is_assignable(target_type, value_type):
                 raise self._error(
                     expr.line,
@@ -282,7 +310,43 @@ class TypeChecker:
             return target_type
 
         if isinstance(expr, ast.CallExpr):
-            callee_type = self._check_expr(expr.callee, scope)
+            if isinstance(expr.callee, ast.FieldAccessExpr):
+                resolved = self._resolve_member_call(expr.callee, expr.arguments, scope, unsafe_depth)
+                if resolved is not None:
+                    symbol, receiver_expr, explicit_args, receiver_strategy = resolved
+                    expected_param_types = list(symbol.type_ref.param_types)
+                    if receiver_expr is not None:
+                        receiver_expected = expected_param_types.pop(0)
+                        receiver_actual = self._check_expr(receiver_expr, scope, unsafe_depth)
+                        if receiver_strategy == "address_of":
+                            receiver_actual = typesys.PointerType(inner=receiver_actual)
+                        if not typesys.is_assignable(receiver_expected, receiver_actual):
+                            raise self._error(
+                                expr.line,
+                                expr.column,
+                                f"receiver type mismatch for method '{symbol.owner_type}.{symbol.name}'",
+                            )
+                    if len(explicit_args) != len(expected_param_types):
+                        raise self._error(
+                            expr.line,
+                            expr.column,
+                            f"expected {len(expected_param_types)} arguments, got {len(explicit_args)}",
+                        )
+                    for argument, expected_type in zip(explicit_args, expected_param_types, strict=True):
+                        actual_type = self._check_expr(argument, scope, unsafe_depth)
+                        if not typesys.is_assignable(expected_type, actual_type):
+                            raise self._error(
+                                argument.line,
+                                argument.column,
+                                f"argument type mismatch: expected {typesys.describe(expected_type)}, got {typesys.describe(actual_type)}",
+                            )
+                    self.call_resolutions[id(expr)] = CallResolution(
+                        lowered_name=symbol.c_name,
+                        receiver_strategy=receiver_strategy,
+                    )
+                    self.expression_types[id(expr)] = symbol.type_ref.return_type
+                    return symbol.type_ref.return_type
+            callee_type = self._check_expr(expr.callee, scope, unsafe_depth)
             if not isinstance(callee_type, typesys.FunctionType):
                 raise self._error(expr.line, expr.column, f"cannot call non-function value of type {typesys.describe(callee_type)}")
             if len(expr.arguments) != len(callee_type.param_types):
@@ -292,7 +356,7 @@ class TypeChecker:
                     f"expected {len(callee_type.param_types)} arguments, got {len(expr.arguments)}",
                 )
             for argument, expected_type in zip(expr.arguments, callee_type.param_types, strict=True):
-                actual_type = self._check_expr(argument, scope)
+                actual_type = self._check_expr(argument, scope, unsafe_depth)
                 if not typesys.is_assignable(expected_type, actual_type):
                     raise self._error(
                         argument.line,
@@ -303,7 +367,7 @@ class TypeChecker:
             return callee_type.return_type
 
         if isinstance(expr, ast.CastExpr):
-            expr_type = self._check_expr(expr.expr, scope)
+            expr_type = self._check_expr(expr.expr, scope, unsafe_depth)
             target_type = self._resolve_type_ref(expr.type_ref)
             if not typesys.is_castable(expr_type, target_type):
                 raise self._error(
@@ -315,30 +379,82 @@ class TypeChecker:
             return target_type
 
         if isinstance(expr, ast.FieldAccessExpr):
-            object_type = self._check_expr(expr.object, scope)
-            if not isinstance(object_type, typesys.StructType):
+            if isinstance(expr.object, ast.IdentifierExpr) and expr.object.name in self.semantic_model.enums:
+                enum_type = self.semantic_model.enums[expr.object.name].type_ref
+                for variant in enum_type.variants:
+                    if variant.name == expr.field:
+                        self.expression_types[id(expr)] = enum_type
+                        return enum_type
+                raise self._error(
+                    expr.line,
+                    expr.column,
+                    f"unknown variant '{expr.field}' for enum '{enum_type.name}'",
+                )
+            object_type = self._check_expr(expr.object, scope, unsafe_depth)
+            if isinstance(object_type, typesys.PointerType) and isinstance(object_type.inner, typesys.StructType):
+                struct_type = object_type.inner
+            elif isinstance(object_type, typesys.StructType):
+                struct_type = object_type
+            elif isinstance(object_type, typesys.PointerType) and isinstance(object_type.inner, typesys.UnionType):
+                if unsafe_depth <= 0:
+                    raise self._error(expr.line, expr.column, "union field access requires unsafe block")
+                union_type = object_type.inner
+                field_type = self._lookup_union_field(union_type, expr.field, expr.line, expr.column)
+                self.expression_types[id(expr)] = field_type
+                return field_type
+            elif isinstance(object_type, typesys.UnionType):
+                if unsafe_depth <= 0:
+                    raise self._error(expr.line, expr.column, "union field access requires unsafe block")
+                field_type = self._lookup_union_field(object_type, expr.field, expr.line, expr.column)
+                self.expression_types[id(expr)] = field_type
+                return field_type
+            else:
                 raise self._error(
                     expr.line,
                     expr.column,
                     f"field access requires struct value, got {typesys.describe(object_type)}",
                 )
-            field_type = self._lookup_struct_field(object_type, expr.field, expr.line, expr.column)
+            field_type = self._lookup_struct_field(struct_type, expr.field, expr.line, expr.column)
             self.expression_types[id(expr)] = field_type
             return field_type
 
         if isinstance(expr, ast.StructLiteralExpr):
-            if expr.type_name not in self.semantic_model.structs:
-                raise self._error(expr.line, expr.column, f"unknown struct '{expr.type_name}'")
-            struct_type = self.semantic_model.structs[expr.type_name].type_ref
-            provided: set[str] = set()
-            field_map = {field.name: field.type_ref for field in struct_type.fields}
-            for field in expr.fields:
+            if expr.type_name in self.semantic_model.structs:
+                struct_type = self.semantic_model.structs[expr.type_name].type_ref
+                provided: set[str] = set()
+                field_map = {field.name: field.type_ref for field in struct_type.fields}
+                for field in expr.fields:
+                    if field.name not in field_map:
+                        raise self._error(field.line, field.column, f"unknown field '{field.name}' for struct '{struct_type.name}'")
+                    if field.name in provided:
+                        raise self._error(field.line, field.column, f"duplicate struct literal field '{field.name}'")
+                    provided.add(field.name)
+                    actual_type = self._check_expr(field.value, scope, unsafe_depth)
+                    expected_type = field_map[field.name]
+                    if not typesys.is_assignable(expected_type, actual_type):
+                        raise self._error(
+                            field.line,
+                            field.column,
+                            f"field '{field.name}' expects {typesys.describe(expected_type)}, got {typesys.describe(actual_type)}",
+                        )
+                missing = [field.name for field in struct_type.fields if field.name not in provided]
+                if missing:
+                    raise self._error(
+                        expr.line,
+                        expr.column,
+                        f"missing fields for struct '{struct_type.name}': {', '.join(missing)}",
+                    )
+                self.expression_types[id(expr)] = struct_type
+                return struct_type
+            if expr.type_name in self.semantic_model.unions:
+                union_type = self.semantic_model.unions[expr.type_name].type_ref
+                if len(expr.fields) != 1:
+                    raise self._error(expr.line, expr.column, f"union literal for '{union_type.name}' must initialize exactly one field")
+                field = expr.fields[0]
+                field_map = {candidate.name: candidate.type_ref for candidate in union_type.fields}
                 if field.name not in field_map:
-                    raise self._error(field.line, field.column, f"unknown field '{field.name}' for struct '{struct_type.name}'")
-                if field.name in provided:
-                    raise self._error(field.line, field.column, f"duplicate struct literal field '{field.name}'")
-                provided.add(field.name)
-                actual_type = self._check_expr(field.value, scope)
+                    raise self._error(field.line, field.column, f"unknown field '{field.name}' for union '{union_type.name}'")
+                actual_type = self._check_expr(field.value, scope, unsafe_depth)
                 expected_type = field_map[field.name]
                 if not typesys.is_assignable(expected_type, actual_type):
                     raise self._error(
@@ -346,15 +462,81 @@ class TypeChecker:
                         field.column,
                         f"field '{field.name}' expects {typesys.describe(expected_type)}, got {typesys.describe(actual_type)}",
                     )
-            missing = [field.name for field in struct_type.fields if field.name not in provided]
-            if missing:
+                self.expression_types[id(expr)] = union_type
+                return union_type
+            raise self._error(expr.line, expr.column, f"unknown composite type '{expr.type_name}'")
+
+        if isinstance(expr, ast.MatchExpr):
+            subject_type = self._check_expr(expr.subject, scope, unsafe_depth)
+            if not isinstance(subject_type, typesys.EnumType):
+                raise self._error(expr.line, expr.column, f"match subject must be enum, got {typesys.describe(subject_type)}")
+
+            seen_variants: set[str] = set()
+            wildcard_expr: ast.Expr | None = None
+            arm_result_type: typesys.Type | None = None
+            cases: list[tuple[str, ast.Expr]] = []
+            valid_variants = {variant.name for variant in subject_type.variants}
+
+            for arm in expr.arms:
+                if isinstance(arm.pattern, ast.EnumVariantPattern):
+                    if arm.pattern.enum_name != subject_type.name:
+                        raise self._error(
+                            arm.line,
+                            arm.column,
+                            f"match arm uses enum '{arm.pattern.enum_name}' but subject is '{subject_type.name}'",
+                        )
+                    if arm.pattern.variant_name not in valid_variants:
+                        raise self._error(
+                            arm.line,
+                            arm.column,
+                            f"unknown variant '{arm.pattern.variant_name}' for enum '{subject_type.name}'",
+                        )
+                    if arm.pattern.variant_name in seen_variants:
+                        raise self._error(
+                            arm.line,
+                            arm.column,
+                            f"duplicate match arm for '{subject_type.name}.{arm.pattern.variant_name}'",
+                        )
+                    seen_variants.add(arm.pattern.variant_name)
+                    cases.append((arm.pattern.variant_name, arm.value))
+                else:
+                    if wildcard_expr is not None:
+                        raise self._error(arm.line, arm.column, "duplicate wildcard match arm")
+                    wildcard_expr = arm.value
+
+                value_type = self._check_expr(arm.value, scope, unsafe_depth)
+                if arm_result_type is None:
+                    arm_result_type = value_type
+                elif not (
+                    typesys.is_assignable(arm_result_type, value_type)
+                    or typesys.is_assignable(value_type, arm_result_type)
+                ):
+                    raise self._error(
+                        arm.line,
+                        arm.column,
+                        f"match arm type mismatch: expected compatible with {typesys.describe(arm_result_type)}, got {typesys.describe(value_type)}",
+                    )
+                elif typesys.is_assignable(value_type, arm_result_type):
+                    arm_result_type = value_type
+
+            if arm_result_type is None:
+                raise self._error(expr.line, expr.column, "match expression must have at least one arm")
+
+            missing = [variant.name for variant in subject_type.variants if variant.name not in seen_variants]
+            if missing and wildcard_expr is None:
                 raise self._error(
                     expr.line,
                     expr.column,
-                    f"missing fields for struct '{struct_type.name}': {', '.join(missing)}",
+                    f"non-exhaustive match for enum '{subject_type.name}': missing {', '.join(missing)}",
                 )
-            self.expression_types[id(expr)] = struct_type
-            return struct_type
+
+            self.match_resolutions[id(expr)] = MatchResolution(
+                enum_name=subject_type.name,
+                cases=tuple(cases),
+                default_expr=wildcard_expr,
+            )
+            self.expression_types[id(expr)] = arm_result_type
+            return arm_result_type
 
         raise self._error(getattr(expr, "line", 0), getattr(expr, "column", 0), f"unsupported expression: {type(expr).__name__}")
 
@@ -364,7 +546,11 @@ class TypeChecker:
         if isinstance(type_ref, ast.NamedType):
             if type_ref.path[0] in typesys.BUILTINS:
                 return typesys.BUILTINS[type_ref.path[0]]
-            return self.semantic_model.structs[type_ref.path[0]].type_ref
+            if type_ref.path[0] in self.semantic_model.structs:
+                return self.semantic_model.structs[type_ref.path[0]].type_ref
+            if type_ref.path[0] in self.semantic_model.enums:
+                return self.semantic_model.enums[type_ref.path[0]].type_ref
+            return self.semantic_model.unions[type_ref.path[0]].type_ref
         if isinstance(type_ref, ast.PointerType):
             return typesys.PointerType(
                 inner=self._resolve_type_ref(type_ref.inner),
@@ -404,6 +590,72 @@ class TypeChecker:
             if field.name == field_name:
                 return field.type_ref
         raise self._error(line, column, f"unknown field '{field_name}' for struct '{struct_type.name}'")
+
+    def _lookup_union_field(self, union_type: typesys.UnionType, field_name: str, line: int, column: int) -> typesys.Type:
+        for field in union_type.fields:
+            if field.name == field_name:
+                return field.type_ref
+        raise self._error(line, column, f"unknown field '{field_name}' for union '{union_type.name}'")
+
+    def _resolve_member_call(
+        self,
+        callee: ast.FieldAccessExpr,
+        call_arguments: list[ast.Expr],
+        scope: Scope,
+        unsafe_depth: int,
+    ) -> tuple[object, ast.Expr | None, list[ast.Expr], str] | None:
+        if isinstance(callee.object, ast.IdentifierExpr) and callee.object.name in self.semantic_model.structs:
+            key = (callee.object.name, callee.field)
+            symbol = self.semantic_model.methods.get(key)
+            if symbol is None:
+                return None
+            if symbol.receiver_type is not None:
+                raise self._error(
+                    callee.line,
+                    callee.column,
+                    f"method '{callee.object.name}.{callee.field}' requires an instance",
+                )
+            return symbol, None, list(call_arguments), "none"
+
+        object_type = self._check_expr(callee.object, scope, unsafe_depth)
+        owner_struct: typesys.StructType | None = None
+        receiver_strategy = "none"
+        if isinstance(object_type, typesys.StructType):
+            owner_struct = object_type
+        elif isinstance(object_type, typesys.PointerType) and isinstance(object_type.inner, typesys.StructType):
+            owner_struct = object_type.inner
+        else:
+            return None
+
+        key = (owner_struct.name, callee.field)
+        symbol = self.semantic_model.methods.get(key)
+        if symbol is None:
+            return None
+        if symbol.receiver_type is None:
+            raise self._error(
+                callee.line,
+                callee.column,
+                f"associated function '{owner_struct.name}.{callee.field}' must be called on the type",
+            )
+
+        if typesys.is_assignable(symbol.receiver_type, object_type):
+            receiver_strategy = "direct"
+        elif (
+            isinstance(symbol.receiver_type, typesys.PointerType)
+            and symbol.receiver_type.inner == owner_struct
+            and object_type == owner_struct
+        ):
+            if not self._is_assignable_target(callee.object):
+                raise self._error(callee.line, callee.column, "method call requires an addressable receiver")
+            receiver_strategy = "address_of"
+        else:
+            raise self._error(
+                callee.line,
+                callee.column,
+                f"receiver type mismatch for method '{owner_struct.name}.{callee.field}'",
+            )
+
+        return symbol, callee.object, list(call_arguments), receiver_strategy
 
     def _error(self, line: int, column: int, message: str) -> TypeCheckError:
         return TypeCheckError(message=message, line=line, column=column, source_name=self.source_name)
