@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Stack-C%2B%2B%20%7C%20Rust%20%7C%20LLVM-007ACC?style=for-the-badge&logo=cplusplus&logoColor=white">
+  <img src="https://img.shields.io/badge/Stack-AFNS%20%7C%20C%20%7C%20C%2B%2B%20%7C%20Rust%20%7C%20LLVM-007ACC?style=for-the-badge&logo=cplusplus&logoColor=white">
   <img src="https://img.shields.io/badge/Focus-Kernel%20%7C%20OS%20%7C%20Drivers-0d0d0d?style=for-the-badge">
   <img src="https://img.shields.io/badge/UI-Native%20%7C%20Declarative-7000FF?style=for-the-badge">
   <img src="https://img.shields.io/badge/Safety-Explicit%20%7C%20Modern-059669?style=for-the-badge">
