@@ -1,0 +1,25 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn break_once() -> void {
+    loop {
+        defer puts("break");
+        break;
+    }
+}
+
+fn continue_twice() -> void {
+    let i: i32 = 0;
+    while i < 2 {
+        i += 1;
+        defer puts("cont");
+        continue;
+    }
+}
+
+fn main() -> i32 {
+    break_once();
+    continue_twice();
+    return 0;
+}

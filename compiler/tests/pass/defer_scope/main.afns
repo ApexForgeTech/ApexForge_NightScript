@@ -1,0 +1,13 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn greet() -> void {
+    defer puts("bye");
+    puts("hi");
+}
+
+fn main() -> i32 {
+    greet();
+    return 0;
+}

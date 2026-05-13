@@ -477,6 +477,23 @@ static int enum_has_variant(Node *decl, const char *variant) {
     return 0;
 }
 
+static int enum_variant_index(Node *decl, const char *variant) {
+    if (!decl || decl->kind != NODE_ENUM_DECL) return -1;
+
+    for (int i = 0; i < decl->as.enum_decl.count; i++) {
+        if (!strcmp(decl->as.enum_decl.variants[i], variant))
+            return i;
+    }
+    return -1;
+}
+
+static NodeList *enum_variant_fields(Node *decl, const char *variant) {
+    int index = enum_variant_index(decl, variant);
+    if (index < 0)
+        return NULL;
+    return &decl->as.enum_decl.variant_fields[index];
+}
+
 static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth);
 
 static int method_has_receiver(Node *method) {
@@ -540,21 +557,50 @@ static int check_receiver(Checker *c, Type *expected, Type *actual, Node *receiv
 
 static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) {
     Type *subject_type = check_expr(c, scope, expr->as.match.subject, unsafe_depth);
+    Node *enum_decl = NULL;
     Type *result_type = NULL;
     char expected_buf[128];
     char actual_buf[128];
+    int saw_wildcard = 0;
+    const char *seen_variants[256];
+    int seen_count = 0;
+
+    if (!(subject_type->kind == TYPE_NAMED)) {
+        format_type(subject_type, actual_buf, sizeof(actual_buf));
+        typeck_error(c, expr->line, expr->col,
+                     "match subject must be an enum, got %s", actual_buf);
+        return &TYPE_ERROR_VALUE;
+    }
+
+    enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
+                                subject_type->name, NODE_ENUM_DECL);
+    if (!enum_decl) {
+        format_type(subject_type, actual_buf, sizeof(actual_buf));
+        typeck_error(c, expr->line, expr->col,
+                     "match subject must be an enum, got %s", actual_buf);
+        return &TYPE_ERROR_VALUE;
+    }
 
     for (int i = 0; i < expr->as.match.count; i++) {
         const char *pattern = expr->as.match.patterns[i];
         Type *arm_type;
 
-        if (strcmp(pattern, "_")) {
+        if (!strcmp(pattern, "_")) {
+            if (saw_wildcard) {
+                typeck_error(c, expr->line, expr->col,
+                             "duplicate wildcard match arm");
+                return &TYPE_ERROR_VALUE;
+            }
+            saw_wildcard = 1;
+        } else {
             const char *dot = strchr(pattern, '.');
             char enum_name[128];
+            const char *variant_name;
 
             if (!dot) return &TYPE_ERROR_VALUE;
             memcpy(enum_name, pattern, (size_t)(dot - pattern));
             enum_name[dot - pattern] = '\0';
+            variant_name = dot + 1;
 
             if (!(subject_type->kind == TYPE_NAMED && !strcmp(subject_type->name, enum_name))) {
                 format_type(subject_type, actual_buf, sizeof(actual_buf));
@@ -563,6 +609,18 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
                              pattern, actual_buf);
                 return &TYPE_ERROR_VALUE;
             }
+
+            for (int j = 0; j < seen_count; j++) {
+                if (!strcmp(seen_variants[j], variant_name)) {
+                    typeck_error(c, expr->line, expr->col,
+                                 "duplicate match arm '%s.%s'",
+                                 enum_name, variant_name);
+                    return &TYPE_ERROR_VALUE;
+                }
+            }
+
+            if (seen_count < (int)(sizeof(seen_variants) / sizeof(seen_variants[0])))
+                seen_variants[seen_count++] = variant_name;
         }
 
         arm_type = check_expr(c, scope, expr->as.match.values[i], unsafe_depth);
@@ -575,6 +633,25 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
                          "match arm type mismatch: expected %s, got %s",
                          expected_buf, actual_buf);
             return &TYPE_ERROR_VALUE;
+        }
+    }
+
+    if (!saw_wildcard) {
+        for (int i = 0; i < enum_decl->as.enum_decl.count; i++) {
+            const char *variant_name = enum_decl->as.enum_decl.variants[i];
+            int seen = 0;
+            for (int j = 0; j < seen_count; j++) {
+                if (!strcmp(seen_variants[j], variant_name)) {
+                    seen = 1;
+                    break;
+                }
+            }
+            if (!seen) {
+                typeck_error(c, expr->line, expr->col,
+                             "non-exhaustive match for enum '%s': missing %s.%s",
+                             subject_type->name, subject_type->name, variant_name);
+                return &TYPE_ERROR_VALUE;
+            }
         }
     }
 
@@ -802,6 +879,39 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
 
             if (callee->kind == NODE_FIELD) {
                 Node *object = callee->as.field.object;
+
+                if (object->kind == NODE_IDENT) {
+                    Node *enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
+                                                      object->as.ident.name, NODE_ENUM_DECL);
+                    if (enum_decl && enum_has_variant(enum_decl, callee->as.field.field)) {
+                        NodeList *fields = enum_variant_fields(enum_decl, callee->as.field.field);
+                        int expected = fields ? fields->count : 0;
+
+                        if (expr->as.call.args.count != expected) {
+                            typeck_error(c, expr->line, expr->col,
+                                         "enum constructor '%s.%s' expects %d arguments, got %d",
+                                         object->as.ident.name, callee->as.field.field,
+                                         expected, expr->as.call.args.count);
+                            return &TYPE_ERROR_VALUE;
+                        }
+
+                        for (int i = 0; i < expected; i++) {
+                            Type *expected_type = type_from_ast(c, fields->items[i]->as.let.type);
+                            Type *actual_type = check_expr(c, scope, expr->as.call.args.items[i], unsafe_depth);
+                            if (!is_assignable(expected_type, actual_type)) {
+                                format_type(expected_type, expected_buf, sizeof(expected_buf));
+                                format_type(actual_type, actual_buf, sizeof(actual_buf));
+                                typeck_error(c, expr->as.call.args.items[i]->line,
+                                             expr->as.call.args.items[i]->col,
+                                             "enum constructor argument mismatch: expected %s, got %s",
+                                             expected_buf, actual_buf);
+                                return &TYPE_ERROR_VALUE;
+                            }
+                        }
+
+                        return make_named_type(c, object->as.ident.name);
+                    }
+                }
 
                 if (object->kind == NODE_IDENT) {
                     Node *method = find_method_decl(c->sema, object->as.ident.name, callee->as.field.field);

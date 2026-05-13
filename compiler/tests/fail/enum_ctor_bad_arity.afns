@@ -1,0 +1,10 @@
+package ctor_arity;
+
+enum Event {
+    Click(x: i32, y: i32);
+}
+
+fn main() -> i32 {
+    let e: Event = Event.Click(10);
+    return 0;
+}

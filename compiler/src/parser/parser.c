@@ -66,6 +66,34 @@ static void nodelist_push(Parser *p, NodeList *list, Node *n) {
     list->items[list->count++] = n;
 }
 
+static int is_path_token(TokenKind kind, int allow_self) {
+    if (kind == TOK_IDENT)
+        return 1;
+    if (allow_self && kind == TOK_SELF)
+        return 1;
+
+    switch (kind) {
+        case TOK_KERNEL:
+        case TOK_NATIVE:
+        case TOK_UI:
+        case TOK_ANDROID:
+        case TOK_DRIVER:
+        case TOK_APP:
+        case TOK_MODULE:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static Token *expect_path_token(Parser *p, const char *msg, int allow_self) {
+    if (is_path_token(cur(p)->kind, allow_self)) {
+        p->pos++;
+        return prev(p);
+    }
+    return expect(p, TOK_IDENT, msg);
+}
+
 /* ── forward declarations ──────────────────────────────────────────────── */
 
 static Node *parse_type(Parser *p);
@@ -108,16 +136,12 @@ static Node *parse_type(Parser *p) {
     char buf[256];
     int  blen = 0;
 
-    if (check(p, TOK_SELF)) {
-        memcpy(buf, "Self", 4); blen = 4; p->pos++;
-    } else {
-        Token *id = expect(p, TOK_IDENT, "expected type name");
-        blen = id->len < 255 ? id->len : 255;
-        memcpy(buf, id->start, (size_t)blen);
-    }
+    Token *id = expect_path_token(p, "expected type name", 1);
+    blen = id->len < 255 ? id->len : 255;
+    memcpy(buf, id->start, (size_t)blen);
     while (check(p, TOK_DOT)) {
         p->pos++;
-        Token *id = expect(p, TOK_IDENT, "expected identifier after '.'");
+        Token *id = expect_path_token(p, "expected identifier after '.'", 0);
         if (blen < 254) { buf[blen++] = '.'; }
         int part = id->len < (255 - blen) ? id->len : (255 - blen);
         memcpy(buf + blen, id->start, (size_t)part);
@@ -912,12 +936,12 @@ Node *parser_parse(TokenList *tl, const char *source_name, Arena *arena) {
     if (match(&p, TOK_PACKAGE)) {
         Token *t = prev(&p);
         char buf[256]; int blen = 0;
-        Token *id = expect(&p, TOK_IDENT, "expected package name");
+        Token *id = expect_path_token(&p, "expected package name", 0);
         blen = id->len < 255 ? id->len : 255;
         memcpy(buf, id->start, (size_t)blen);
         while (check(&p, TOK_DOT)) {
             p.pos++;
-            Token *part = expect(&p, TOK_IDENT, "expected identifier after '.'");
+            Token *part = expect_path_token(&p, "expected identifier after '.'", 0);
             if (blen < 254) buf[blen++] = '.';
             int pl = part->len < (255 - blen) ? part->len : (255 - blen);
             memcpy(buf + blen, part->start, (size_t)pl); blen += pl;
@@ -933,12 +957,12 @@ Node *parser_parse(TokenList *tl, const char *source_name, Arena *arena) {
     while (match(&p, TOK_IMPORT)) {
         Token *t = prev(&p);
         char buf[256]; int blen = 0;
-        Token *id = expect(&p, TOK_IDENT, "expected import path");
+        Token *id = expect_path_token(&p, "expected import path", 0);
         blen = id->len < 255 ? id->len : 255;
         memcpy(buf, id->start, (size_t)blen);
         while (check(&p, TOK_DOT)) {
             p.pos++;
-            Token *part = expect(&p, TOK_IDENT, "expected identifier after '.'");
+            Token *part = expect_path_token(&p, "expected identifier after '.'", 0);
             if (blen < 254) buf[blen++] = '.';
             int pl = part->len < (255 - blen) ? part->len : (255 - blen);
             memcpy(buf + blen, part->start, (size_t)pl); blen += pl;

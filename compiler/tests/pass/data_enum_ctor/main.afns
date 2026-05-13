@@ -1,0 +1,26 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Event {
+    Click(x: i32, y: i32);
+    Key(code: u32);
+    None;
+}
+
+fn tag_of(e: Event) -> i32 {
+    return match e {
+        Event.Click => 1,
+        Event.Key   => 2,
+        Event.None  => 0,
+    };
+}
+
+fn main() -> i32 {
+    let e: Event = Event.Click(10, 20);
+    let r: i32 = tag_of(e);
+    if r == 1 {
+        puts("ok");
+    }
+    return 0;
+}

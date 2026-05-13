@@ -1,0 +1,8 @@
+package kernel.main;
+
+import kernel.vga;
+import ui.window;
+
+fn main() -> i32 {
+    return 0;
+}

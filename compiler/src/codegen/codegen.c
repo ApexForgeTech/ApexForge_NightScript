@@ -409,6 +409,7 @@ static void make_c_name(char *out, int outsz, const char *owner, const char *nam
 typedef struct CGBinding CGBinding;
 typedef struct CGScope CGScope;
 typedef struct CGTempType CGTempType;
+typedef struct IntStack IntStack;
 
 struct CGBinding {
     const char *name;
@@ -426,6 +427,12 @@ struct CGTempType {
     CGTempType *next;
 };
 
+struct IntStack {
+    int *items;
+    int count;
+    int cap;
+};
+
 typedef struct {
     Node       *program;
     CGScope    *scope;
@@ -433,13 +440,44 @@ typedef struct {
     Node      **defers;     /* function-scoped defer list */
     int         defer_count;
     int         defer_cap;
+    IntStack    scope_defer_markers;
+    IntStack    loop_defer_markers;
 } CGContext;
+
+static int intstack_push(IntStack *stack, int value) {
+    int *new_items;
+
+    if (stack->count == stack->cap) {
+        int new_cap = stack->cap ? stack->cap * 2 : 8;
+        new_items = realloc(stack->items, (size_t)new_cap * sizeof(int));
+        if (!new_items)
+            return 0;
+        stack->items = new_items;
+        stack->cap = new_cap;
+    }
+
+    stack->items[stack->count++] = value;
+    return 1;
+}
+
+static int intstack_pop(IntStack *stack) {
+    if (stack->count == 0)
+        return 0;
+    return stack->items[--stack->count];
+}
+
+static int intstack_top(const IntStack *stack) {
+    if (stack->count == 0)
+        return 0;
+    return stack->items[stack->count - 1];
+}
 
 static void cg_push_scope(CGContext *cg) {
     CGScope *scope = malloc(sizeof(CGScope));
     scope->parent  = cg->scope;
     scope->bindings = NULL;
     cg->scope      = scope;
+    intstack_push(&cg->scope_defer_markers, cg->defer_count);
 }
 
 static void cg_pop_scope(CGContext *cg) {
@@ -455,6 +493,8 @@ static void cg_pop_scope(CGContext *cg) {
     CGScope *parent = cg->scope->parent;
     free(cg->scope);
     cg->scope = parent;
+    if (cg->scope_defer_markers.count > 0)
+        intstack_pop(&cg->scope_defer_markers);
 }
 
 static void cg_define(CGContext *cg, const char *name, Node *type) {
@@ -497,6 +537,8 @@ static Node *cg_temp_type_pointer(CGContext *cg, Node *inner, int is_const) {
     return &temp->node;
 }
 
+static void emit_expr(COut *o, CGContext *cg, Node *n);
+
 static void cg_free_temps(CGContext *cg) {
     CGTempType *temp = cg->temps;
     while (temp) {
@@ -505,6 +547,23 @@ static void cg_free_temps(CGContext *cg) {
         temp = next;
     }
     cg->temps = NULL;
+}
+
+static void emit_defers_range(COut *o, CGContext *cg, int marker) {
+    if (marker < 0)
+        marker = 0;
+
+    for (int i = cg->defer_count - 1; i >= marker; i--) {
+        emit_indent(o);
+        emit_expr(o, cg, cg->defers[i]);
+        emit(o, ";\n");
+    }
+}
+
+static void emit_scope_defers(COut *o, CGContext *cg) {
+    int marker = intstack_top(&cg->scope_defer_markers);
+    emit_defers_range(o, cg, marker);
+    cg->defer_count = marker;
 }
 
 static const char *type_named_name(Node *type) {
@@ -609,6 +668,22 @@ static Node *find_method(CGContext *cg, const char *owner_name, const char *meth
     return NULL;
 }
 
+static Node *find_enum_variant_decl(CGContext *cg, const char *enum_name, const char *variant_name, NodeList **out_fields) {
+    Node *decl = find_decl_named(cg->program, NODE_ENUM_DECL, enum_name);
+    if (!decl)
+        return NULL;
+
+    for (int i = 0; i < decl->as.enum_decl.count; i++) {
+        if (!strcmp(decl->as.enum_decl.variants[i], variant_name)) {
+            if (out_fields)
+                *out_fields = &decl->as.enum_decl.variant_fields[i];
+            return decl;
+        }
+    }
+
+    return NULL;
+}
+
 static int method_has_receiver(Node *method) {
     if (!method || method->kind != NODE_FN_DECL || method->as.fn.params.count == 0)
         return 0;
@@ -680,6 +755,21 @@ static void emit_match_expr(COut *o, CGContext *cg, Node *match) {
         emit(o, "0");
 
     emit(o, ")");
+}
+
+static int is_enum_variant_constructor_call(CGContext *cg, Node *call, Node **out_enum_decl, NodeList **out_fields) {
+    Node *callee = call->as.call.callee;
+    Node *object;
+
+    if (!callee || callee->kind != NODE_FIELD)
+        return 0;
+
+    object = callee->as.field.object;
+    if (!object || object->kind != NODE_IDENT)
+        return 0;
+
+    *out_enum_decl = find_enum_variant_decl(cg, object->as.ident.name, callee->as.field.field, out_fields);
+    return *out_enum_decl != NULL;
 }
 
 static Node *resolve_call_return_type(CGContext *cg, Node *call) {
@@ -754,6 +844,13 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
         case NODE_STRUCT_LIT:
             return cg_temp_type_named(cg, expr->as.struct_lit.type_name);
         case NODE_CALL:
+            if (resolve_call_return_type(cg, expr) == NULL) {
+                Node *enum_decl = NULL;
+                NodeList *fields = NULL;
+
+                if (is_enum_variant_constructor_call(cg, expr, &enum_decl, &fields))
+                    return cg_temp_type_named(cg, enum_decl->as.enum_decl.name);
+            }
             return resolve_call_return_type(cg, expr);
         case NODE_FIELD: {
             Node *object = expr->as.field.object;
@@ -892,7 +989,25 @@ static void emit_expr(COut *o, CGContext *cg, Node *n) {
             emit(o, ")");
             break;
         case NODE_CALL: {
+            Node *enum_decl = NULL;
+            NodeList *fields = NULL;
             MethodResolution method = resolve_method_call(cg, n);
+            if (is_enum_variant_constructor_call(cg, n, &enum_decl, &fields)) {
+                const char *enum_name = enum_decl->as.enum_decl.name;
+                const char *variant_name = n->as.call.callee->as.field.field;
+                emit(o, "((%s){ .tag = %s_%s", enum_name, enum_name, variant_name);
+                if (fields && fields->count > 0) {
+                    emit(o, ", .as.%s = { ", variant_name);
+                    for (int i = 0; i < fields->count; i++) {
+                        if (i) emit(o, ", ");
+                        emit(o, ".%s = ", fields->items[i]->as.let.name);
+                        emit_expr(o, cg, n->as.call.args.items[i]);
+                    }
+                    emit(o, " }");
+                }
+                emit(o, " })");
+                break;
+            }
             if (method.method) {
                 char cname[256];
                 make_c_name(cname, sizeof(cname),
@@ -996,12 +1111,48 @@ static void emit_expr(COut *o, CGContext *cg, Node *n) {
 static void emit_stmt(COut *o, CGContext *cg, Node *n);
 static void emit_block(COut *o, CGContext *cg, Node *block);
 
+static int stmt_terminates_control_flow(Node *n) {
+    if (!n)
+        return 0;
+
+    switch (n->kind) {
+        case NODE_RETURN:
+        case NODE_BREAK:
+        case NODE_CONTINUE:
+            return 1;
+        case NODE_BLOCK:
+            for (int i = 0; i < n->as.block.stmts.count; i++) {
+                if (stmt_terminates_control_flow(n->as.block.stmts.items[i]))
+                    return 1;
+            }
+            return 0;
+        case NODE_IF:
+            if (!n->as.if_stmt.else_node)
+                return 0;
+            return stmt_terminates_control_flow(n->as.if_stmt.then_block) &&
+                   stmt_terminates_control_flow(n->as.if_stmt.else_node);
+        default:
+            return 0;
+    }
+}
+
 static void emit_block(COut *o, CGContext *cg, Node *block) {
+    int terminated = 0;
     emit(o, "{\n");
     cg_push_scope(cg);
     o->indent++;
-    for (int i = 0; i < block->as.block.stmts.count; i++)
+    for (int i = 0; i < block->as.block.stmts.count; i++) {
         emit_stmt(o, cg, block->as.block.stmts.items[i]);
+        if (stmt_terminates_control_flow(block->as.block.stmts.items[i])) {
+            terminated = 1;
+            break;
+        }
+    }
+    if (!terminated) {
+        emit_scope_defers(o, cg);
+    } else {
+        cg->defer_count = intstack_top(&cg->scope_defer_markers);
+    }
     o->indent--;
     cg_pop_scope(cg);
     emit_indent(o);
@@ -1043,12 +1194,7 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             break;
         }
         case NODE_RETURN: {
-            /* emit deferred expressions in reverse order before returning */
-            for (int i = cg->defer_count - 1; i >= 0; i--) {
-                emit_indent(o);
-                emit_expr(o, cg, cg->defers[i]);
-                emit(o, ";\n");
-            }
+            emit_defers_range(o, cg, 0);
             emit_indent(o);
             if (n->as.ret.value) {
                 emit(o, "return ");
@@ -1087,14 +1233,18 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             emit(o, "while (");
             emit_expr(o, cg, n->as.while_stmt.cond);
             emit(o, ") ");
+            intstack_push(&cg->loop_defer_markers, cg->defer_count);
             emit_block(o, cg, n->as.while_stmt.body);
+            intstack_pop(&cg->loop_defer_markers);
             emit(o, "\n");
             break;
         }
         case NODE_LOOP: {
             emit_indent(o);
             emit(o, "for (;;) ");
+            intstack_push(&cg->loop_defer_markers, cg->defer_count);
             emit_block(o, cg, n->as.loop_stmt.body);
+            intstack_pop(&cg->loop_defer_markers);
             emit(o, "\n");
             break;
         }
@@ -1128,7 +1278,10 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             if (n->as.for_stmt.post)
                 emit_expr(o, cg, n->as.for_stmt.post);
             emit(o, ") ");
+            intstack_push(&cg->loop_defer_markers, cg->defer_count);
             emit_block(o, cg, n->as.for_stmt.body);
+            intstack_pop(&cg->loop_defer_markers);
+            emit_scope_defers(o, cg);
             cg_pop_scope(cg);
             emit(o, "\n");
             break;
@@ -1140,10 +1293,12 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             break;
         }
         case NODE_BREAK: {
+            emit_defers_range(o, cg, intstack_top(&cg->loop_defer_markers));
             emitln(o, "break;");
             break;
         }
         case NODE_CONTINUE: {
+            emit_defers_range(o, cg, intstack_top(&cg->loop_defer_markers));
             emitln(o, "continue;");
             break;
         }
@@ -1486,6 +1641,8 @@ static void emit_definitions(COut *o, Node *prog) {
     }
     cg_free_temps(&cg);
     free(cg.defers);
+    free(cg.scope_defer_markers.items);
+    free(cg.loop_defer_markers.items);
 }
 
 /* ── main entry ────────────────────────────────────────────────────────── */

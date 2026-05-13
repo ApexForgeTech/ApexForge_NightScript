@@ -1,0 +1,10 @@
+package ctor_type;
+
+enum Event {
+    Click(x: i32, y: i32);
+}
+
+fn main() -> i32 {
+    let e: Event = Event.Click("bad", 20);
+    return 0;
+}
