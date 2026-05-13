@@ -742,6 +742,7 @@ typedef struct {
     CGScope    *scope;
     CGTempType *temps;
     Node       *current_return_type;
+    int         temp_counter;
     Node      **defers;     /* function-scoped defer list */
     int         defer_count;
     int         defer_cap;
@@ -1009,6 +1010,123 @@ static Node *infer_expr_type(CGContext *cg, Node *expr);
 static void emit_expr(COut *o, CGContext *cg, Node *n);
 static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type);
 
+static char *option_inner_name_text(const char *name) {
+    if (!type_name_has_form(name, "Option"))
+        return NULL;
+    return slice_range_dup(name + 7, name + strlen(name) - 1);
+}
+
+static int result_inner_name_texts(const char *name, char **ok_name, char **err_name) {
+    char *inner;
+    int ok;
+
+    *ok_name = NULL;
+    *err_name = NULL;
+    if (!type_name_has_form(name, "Result"))
+        return 0;
+
+    inner = slice_range_dup(name + 7, name + strlen(name) - 1);
+    if (!inner)
+        return 0;
+    ok = split_top_level_comma(inner, ok_name, err_name);
+    free(inner);
+    return ok;
+}
+
+static Node *cg_temp_type_from_name(CGContext *cg, const char *name) {
+    return name ? cg_temp_type_named(cg, name) : NULL;
+}
+
+static int expr_is_try(Node *expr) {
+    return expr && expr->kind == NODE_UNARY && expr->as.unary.op &&
+           !strcmp(expr->as.unary.op, "?");
+}
+
+static int expr_is_try_constructor(Node *expr, const char *ctor_name) {
+    return expr &&
+           expr->kind == NODE_CALL &&
+           expr->as.call.callee &&
+           expr->as.call.callee->kind == NODE_IDENT &&
+           !strcmp(expr->as.call.callee->as.ident.name, ctor_name) &&
+           expr->as.call.args.count == 1 &&
+           expr_is_try(expr->as.call.args.items[0]);
+}
+
+static void make_try_temp_name(CGContext *cg, char *buf, size_t size) {
+    snprintf(buf, size, "__ns_try_%d", cg->temp_counter++);
+}
+
+static void emit_try_propagation_failure(COut *o, CGContext *cg, Node *operand_type, const char *temp_name) {
+    const char *ret_name;
+    char c_ret_name[256];
+
+    if (!cg->current_return_type || cg->current_return_type->kind != NODE_TYPE_NAMED ||
+        !operand_type || operand_type->kind != NODE_TYPE_NAMED)
+        return;
+
+    ret_name = cg->current_return_type->as.type_named.name;
+    format_option_result_type_name(ret_name, c_ret_name, sizeof(c_ret_name));
+
+    emit_defers_range(o, cg, 0);
+    emit_indent(o);
+    if (type_name_has_form(operand_type->as.type_named.name, "Option")) {
+        emit(o, "return ((%s){ .is_some = false });\n", c_ret_name);
+    } else {
+        emit(o, "return ((%s){ .is_ok = false, .as.err = %s.as.err });\n",
+             c_ret_name, temp_name);
+    }
+}
+
+static void emit_try_unwrap_prefix(COut *o, CGContext *cg, Node *try_expr,
+                                   Node **out_operand_type, char *temp_name, size_t temp_name_size) {
+    Node *operand = try_expr->as.unary.operand;
+    Node *operand_type = infer_expr_type(cg, operand);
+
+    make_try_temp_name(cg, temp_name, temp_name_size);
+    emit_indent(o);
+    emit_typed_name(o, operand_type, temp_name);
+    emit(o, " = ");
+    emit_expr(o, cg, operand);
+    emit(o, ";\n");
+    emit_indent(o);
+    if (operand_type && operand_type->kind == NODE_TYPE_NAMED &&
+        type_name_has_form(operand_type->as.type_named.name, "Option")) {
+        emit(o, "if (!%s.is_some) {\n", temp_name);
+    } else {
+        emit(o, "if (!%s.is_ok) {\n", temp_name);
+    }
+    o->indent++;
+    emit_try_propagation_failure(o, cg, operand_type, temp_name);
+    o->indent--;
+    emit_indent(o);
+    emit(o, "}\n");
+    *out_operand_type = operand_type;
+}
+
+static Node *try_unwrapped_type(CGContext *cg, Node *operand_type) {
+    char *inner_name = NULL;
+    char *ok_name = NULL;
+    char *err_name = NULL;
+    Node *result = NULL;
+
+    if (!operand_type || operand_type->kind != NODE_TYPE_NAMED)
+        return NULL;
+
+    if (type_name_has_form(operand_type->as.type_named.name, "Option")) {
+        inner_name = option_inner_name_text(operand_type->as.type_named.name);
+        result = cg_temp_type_from_name(cg, inner_name);
+        return result;
+    }
+
+    if (type_name_has_form(operand_type->as.type_named.name, "Result")) {
+        if (result_inner_name_texts(operand_type->as.type_named.name, &ok_name, &err_name))
+            result = cg_temp_type_from_name(cg, ok_name);
+        return result;
+    }
+
+    return NULL;
+}
+
 static void emit_match_condition(COut *o, CGContext *cg, Node *subject, const char *pattern) {
     const char *dot = strchr(pattern, '.');
 
@@ -1163,6 +1281,10 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
         case NODE_GROUP:
             return infer_expr_type(cg, expr->as.group.expr);
         case NODE_UNARY: {
+            if (!strcmp(expr->as.unary.op, "?")) {
+                Node *operand_type = infer_expr_type(cg, expr->as.unary.operand);
+                return try_unwrapped_type(cg, operand_type);
+            }
             if (!strcmp(expr->as.unary.op, "&")) {
                 Node *inner = infer_expr_type(cg, expr->as.unary.operand);
                 return inner ? cg_temp_type_pointer(cg, inner, 0) : NULL;
@@ -1374,6 +1496,10 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             emit(o, ")");
             break;
         case NODE_UNARY:
+            if (!strcmp(n->as.unary.op, "?")) {
+                emit(o, "/*try?*/0");
+                break;
+            }
             /* dereference: *ptr → (*ptr) */
             emit(o, "(%s", n->as.unary.op);
             emit_expr(o, cg, n->as.unary.operand);
@@ -1575,6 +1701,23 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
     switch (n->kind) {
         case NODE_LET: {
             Node *type = n->as.let.type ? n->as.let.type : infer_expr_type(cg, n->as.let.value);
+            if (n->as.let.value && expr_is_try(n->as.let.value)) {
+                char temp_name[64];
+                Node *operand_type = NULL;
+                Node *inner_type;
+
+                emit_try_unwrap_prefix(o, cg, n->as.let.value, &operand_type, temp_name, sizeof(temp_name));
+                inner_type = try_unwrapped_type(cg, operand_type);
+                emit_indent(o);
+                emit_typed_name(o, type ? type : inner_type, n->as.let.name);
+                emit(o, " = %s.%s;\n", temp_name,
+                     operand_type && operand_type->kind == NODE_TYPE_NAMED &&
+                     type_name_has_form(operand_type->as.type_named.name, "Option")
+                         ? "value"
+                         : "as.ok");
+                cg_define(cg, n->as.let.name, type ? type : inner_type);
+                break;
+            }
             emit_indent(o);
             emit_typed_name(o, type ? type : cg_temp_type_named(cg, "void"), n->as.let.name);
             if (n->as.let.value) {
@@ -1587,6 +1730,24 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
         }
         case NODE_CONST: {
             Node *type = n->as.konst.type ? n->as.konst.type : infer_expr_type(cg, n->as.konst.value);
+            if (n->as.konst.value && expr_is_try(n->as.konst.value)) {
+                char temp_name[64];
+                Node *operand_type = NULL;
+                Node *inner_type;
+
+                emit_try_unwrap_prefix(o, cg, n->as.konst.value, &operand_type, temp_name, sizeof(temp_name));
+                inner_type = try_unwrapped_type(cg, operand_type);
+                emit_indent(o);
+                emit(o, "const ");
+                emit_typed_name(o, type ? type : inner_type, n->as.konst.name);
+                emit(o, " = %s.%s;\n", temp_name,
+                     operand_type && operand_type->kind == NODE_TYPE_NAMED &&
+                     type_name_has_form(operand_type->as.type_named.name, "Option")
+                         ? "value"
+                         : "as.ok");
+                cg_define(cg, n->as.konst.name, type ? type : inner_type);
+                break;
+            }
             emit_indent(o);
             emit(o, "const ");
             emit_typed_name(o, type ? type : cg_temp_type_named(cg, "void"), n->as.konst.name);
@@ -1605,6 +1766,36 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             break;
         }
         case NODE_RETURN: {
+            if (n->as.ret.value && expr_is_try_constructor(n->as.ret.value, "Ok")) {
+                char temp_name[64];
+                Node *operand_type = NULL;
+                char c_ret_name[256];
+
+                emit_try_unwrap_prefix(o, cg, n->as.ret.value->as.call.args.items[0],
+                                       &operand_type, temp_name, sizeof(temp_name));
+                emit_defers_range(o, cg, 0);
+                format_option_result_type_name(cg->current_return_type->as.type_named.name,
+                                               c_ret_name, sizeof(c_ret_name));
+                emit_indent(o);
+                emit(o, "return ((%s){ .is_ok = true, .as.ok = %s.as.ok });\n",
+                     c_ret_name, temp_name);
+                break;
+            }
+            if (n->as.ret.value && expr_is_try_constructor(n->as.ret.value, "Some")) {
+                char temp_name[64];
+                Node *operand_type = NULL;
+                char c_ret_name[256];
+
+                emit_try_unwrap_prefix(o, cg, n->as.ret.value->as.call.args.items[0],
+                                       &operand_type, temp_name, sizeof(temp_name));
+                emit_defers_range(o, cg, 0);
+                format_option_result_type_name(cg->current_return_type->as.type_named.name,
+                                               c_ret_name, sizeof(c_ret_name));
+                emit_indent(o);
+                emit(o, "return ((%s){ .is_some = true, .value = %s.value });\n",
+                     c_ret_name, temp_name);
+                break;
+            }
             emit_defers_range(o, cg, 0);
             emit_indent(o);
             if (n->as.ret.value) {

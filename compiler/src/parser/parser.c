@@ -396,6 +396,14 @@ static Node *parse_postfix(Parser *p) {
             expr = n;
             continue;
         }
+        if (match(p, TOK_QUESTION)) {
+            Token *op = prev(p);
+            Node *n = node_new(p, NODE_UNARY, op->line, op->col);
+            n->as.unary.op = arena_strdup(p->arena, op->start, op->len);
+            n->as.unary.operand = expr;
+            expr = n;
+            continue;
+        }
         /* postfix ++ / -- : desugar to compound assign */
         if (match(p, TOK_PLUSPLUS) || match(p, TOK_MINUSMINUS)) {
             Token *op  = prev(p);

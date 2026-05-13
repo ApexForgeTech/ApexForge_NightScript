@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..35\n'
+printf '1..36\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -222,11 +222,16 @@ run_capture "option result match run" "$NIGHT" run "$PASS_DIR/option_result_matc
 assert_contains "$TMP_DIR/stdout" "ok" "option result match run"
 printf 'ok 30 - option result match\n'
 
+run_capture "result try check" "$NIGHT" check "$PASS_DIR/result_try/main.afns"
+run_capture "result try run" "$NIGHT" run "$PASS_DIR/result_try/main.afns" -o "$TMP_DIR/result_try_run"
+assert_contains "$TMP_DIR/stdout" "ok" "result try run"
+printf 'ok 31 - result try propagation\n'
+
 run_fail_case "$FAIL_DIR/some_without_context.afns" "$FAIL_DIR/some_without_context.err" "some without context diagnostic"
-printf 'ok 31 - some without context diagnostic\n'
+printf 'ok 32 - some without context diagnostic\n'
 
 run_fail_case "$FAIL_DIR/option_some_bad_type.afns" "$FAIL_DIR/option_some_bad_type.err" "option some bad type diagnostic"
-printf 'ok 32 - option some bad type diagnostic\n'
+printf 'ok 33 - option some bad type diagnostic\n'
 
 cp "$PASS_DIR/fmt_input/main.afns" "$TMP_DIR/fmt_main.afns"
 run_capture "fmt command" "$NIGHT" fmt "$TMP_DIR/fmt_main.afns"
@@ -237,7 +242,7 @@ if ! cmp -s "$TMP_DIR/fmt_main.afns" "$PASS_DIR/fmt_input/main.expected"; then
     cat "$TMP_DIR/fmt_main.afns" >&2
     fail "fmt command output mismatch"
 fi
-printf 'ok 33 - fmt command\n'
+printf 'ok 34 - fmt command\n'
 
 mkdir -p "$TMP_DIR/project_cli/src"
 cp "$PASS_DIR/project_cli/night.toml" "$TMP_DIR/project_cli/night.toml"
@@ -256,7 +261,7 @@ run_capture "project clean" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" cle
 if [ -e "$TMP_DIR/project_cli/project_cli_bin" ] || [ -e "$TMP_DIR/project_cli/project_cli_bin.generated.c" ]; then
     fail "project clean did not remove build outputs"
 fi
-printf 'ok 34 - night.toml project flow\n'
+printf 'ok 35 - night.toml project flow\n'
 
 run_capture "init command" "$NIGHT" init "$TMP_DIR/init_proj"
 if [ ! -f "$TMP_DIR/init_proj/night.toml" ] || [ ! -f "$TMP_DIR/init_proj/src/main.afns" ]; then
@@ -265,4 +270,4 @@ fi
 assert_contains "$TMP_DIR/init_proj/night.toml" "[target]" "init target section"
 assert_contains "$TMP_DIR/init_proj/night.toml" "mode = \"native\"" "init target mode"
 assert_contains "$TMP_DIR/init_proj/night.toml" "backend = \"c\"" "init target backend"
-printf 'ok 35 - init command\n'
+printf 'ok 36 - init command\n'

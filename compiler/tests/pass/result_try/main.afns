@@ -1,0 +1,44 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Error {
+    Bad;
+}
+
+fn step(v: i32) -> Result[i32, Error] {
+    if v > 0 {
+        return Ok(v + 1);
+    }
+    return Err(Error.Bad);
+}
+
+fn chain(v: i32) -> Result[i32, Error] {
+    let a = step(v)?;
+    let b = step(a)?;
+    return Ok(b);
+}
+
+fn wrap(v: i32) -> Result[i32, Error] {
+    return Ok(step(v)?);
+}
+
+fn main() -> i32 {
+    let ok1: Result[i32, Error] = chain(1);
+    let ok2: Result[i32, Error] = wrap(1);
+
+    let a: i32 = match ok1 {
+        Ok => 1,
+        Err => 0,
+    };
+    let b: i32 = match ok2 {
+        Ok => 1,
+        Err => 0,
+    };
+
+    if a == 1 && b == 1 {
+        puts("ok");
+    }
+
+    return 0;
+}

@@ -69,6 +69,7 @@ struct Scope {
 typedef struct {
     const char *source_name;
     const SemanticModel *sema;
+    Type *current_return_type;
     int had_error;
     TypeAlloc *allocs;
 } Checker;
@@ -645,6 +646,80 @@ static int check_contextual_constructor(Checker *c, Scope *scope, Type *expected
     return 0;
 }
 
+static Type *check_try_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) {
+    Type *operand;
+    char actual_buf[128];
+
+    if (!c->current_return_type) {
+        typeck_error(c, expr->line, expr->col,
+                     "operator ? can only be used inside a function");
+        return &TYPE_ERROR_VALUE;
+    }
+
+    operand = check_expr(c, scope, expr->as.unary.operand, unsafe_depth);
+
+    if (is_option_type(operand)) {
+        char *inner_name;
+        Type *inner_type;
+
+        if (!is_option_type(c->current_return_type)) {
+            format_type(c->current_return_type, actual_buf, sizeof(actual_buf));
+            typeck_error(c, expr->line, expr->col,
+                         "operator ? on Option requires function return type Option[...], got %s",
+                         actual_buf);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        inner_name = option_inner_name(operand);
+        inner_type = inner_name ? type_from_name_text(c, inner_name) : &TYPE_ERROR_VALUE;
+        return inner_type;
+    }
+
+    if (is_result_type(operand)) {
+        char *ok_name = NULL;
+        char *err_name = NULL;
+        char *ret_ok_name = NULL;
+        char *ret_err_name = NULL;
+        Type *ok_type;
+        Type *err_type;
+        Type *ret_err_type;
+
+        if (!is_result_type(c->current_return_type)) {
+            format_type(c->current_return_type, actual_buf, sizeof(actual_buf));
+            typeck_error(c, expr->line, expr->col,
+                         "operator ? on Result requires function return type Result[..., ...], got %s",
+                         actual_buf);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        if (!result_inner_names(operand, &ok_name, &err_name) ||
+            !result_inner_names(c->current_return_type, &ret_ok_name, &ret_err_name)) {
+            return &TYPE_ERROR_VALUE;
+        }
+
+        ok_type = type_from_name_text(c, ok_name);
+        err_type = type_from_name_text(c, err_name);
+        ret_err_type = type_from_name_text(c, ret_err_name);
+
+        if (!(is_assignable(ret_err_type, err_type) && is_assignable(err_type, ret_err_type))) {
+            char expected_buf[128];
+            format_type(ret_err_type, expected_buf, sizeof(expected_buf));
+            format_type(err_type, actual_buf, sizeof(actual_buf));
+            typeck_error(c, expr->line, expr->col,
+                         "operator ? error type mismatch: expected %s, got %s",
+                         expected_buf, actual_buf);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        return ok_type;
+    }
+
+    format_type(operand, actual_buf, sizeof(actual_buf));
+    typeck_error(c, expr->line, expr->col,
+                 "operator ? requires Option or Result, got %s", actual_buf);
+    return &TYPE_ERROR_VALUE;
+}
+
 static int composite_has_field(Node *decl, const char *field, Node **field_node) {
     NodeList *fields = NULL;
 
@@ -975,6 +1050,9 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
             return check_expr(c, scope, expr->as.group.expr, unsafe_depth);
 
         case NODE_UNARY: {
+            if (!strcmp(expr->as.unary.op, "?"))
+                return check_try_expr(c, scope, expr, unsafe_depth);
+
             Type *operand = check_expr(c, scope, expr->as.unary.operand, unsafe_depth);
 
             if (!strcmp(expr->as.unary.op, "!")) {
@@ -1662,6 +1740,7 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
 static int check_function(Checker *c, Node *fn_decl) {
     Scope *scope = scope_new(NULL);
     Type *return_type = type_from_ast(c, fn_decl->as.fn.ret_type);
+    Type *prev_return_type = c->current_return_type;
 
     if (!scope) {
         typeck_error(c, fn_decl->line, fn_decl->col, "out of memory");
@@ -1693,11 +1772,14 @@ static int check_function(Checker *c, Node *fn_decl) {
         }
     }
 
+    c->current_return_type = return_type;
     if (!check_block(c, scope, fn_decl->as.fn.body, return_type, 0)) {
+        c->current_return_type = prev_return_type;
         scope_free(scope);
         return 0;
     }
 
+    c->current_return_type = prev_return_type;
     scope_free(scope);
     return !c->had_error;
 }
