@@ -11,6 +11,7 @@ typedef enum {
 
     /* expressions */
     NODE_LIT_INT,
+    NODE_LIT_CHAR,
     NODE_LIT_FLOAT,
     NODE_LIT_STRING,
     NODE_LIT_BOOL,
@@ -91,7 +92,7 @@ struct Node {
             int   length;
         } type_array;
 
-        /* NODE_LIT_INT / NODE_LIT_BOOL / NODE_LIT_NULL */
+        /* NODE_LIT_INT / NODE_LIT_CHAR / NODE_LIT_BOOL / NODE_LIT_NULL */
         struct { long long value; } lit_int;
 
         /* NODE_LIT_FLOAT */

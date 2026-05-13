@@ -253,7 +253,7 @@ static Node *find_method_decl(const SemanticModel *sema, const char *owner, cons
 }
 
 static int is_integer_kind(TypeKind kind) {
-    return kind == TYPE_I8 || kind == TYPE_I16 || kind == TYPE_I32 || kind == TYPE_I64 ||
+    return kind == TYPE_CHAR || kind == TYPE_I8 || kind == TYPE_I16 || kind == TYPE_I32 || kind == TYPE_I64 ||
            kind == TYPE_ISIZE || kind == TYPE_U8 || kind == TYPE_U16 || kind == TYPE_U32 ||
            kind == TYPE_U64 || kind == TYPE_USIZE || kind == TYPE_INT_LITERAL;
 }
@@ -367,7 +367,8 @@ static int is_assignable(Type *expected, Type *actual) {
     if (expected->kind == TYPE_ERROR || actual->kind == TYPE_ERROR) return 1;
     if (type_equals(expected, actual)) return 1;
 
-    if (actual->kind == TYPE_INT_LITERAL && is_integer_kind(expected->kind))
+    if (actual->kind == TYPE_INT_LITERAL &&
+        (is_integer_kind(expected->kind) || expected->kind == TYPE_CHAR))
         return 1;
     if (actual->kind == TYPE_FLOAT_LITERAL && is_float_kind(expected->kind))
         return 1;
@@ -451,6 +452,199 @@ static Type *type_from_ast(Checker *c, Node *type_node) {
     }
 }
 
+static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth);
+
+static int type_name_has_form(const char *name, const char *prefix) {
+    size_t prefix_len;
+    size_t len;
+
+    if (!name || !prefix)
+        return 0;
+
+    prefix_len = strlen(prefix);
+    len = strlen(name);
+    return len > prefix_len + 1 &&
+           !strncmp(name, prefix, prefix_len) &&
+           name[prefix_len] == '[' &&
+           name[len - 1] == ']';
+}
+
+static char *slice_range_dup(const char *start, const char *end) {
+    size_t len;
+    char *copy;
+
+    if (!start || !end || end < start)
+        return NULL;
+
+    len = (size_t)(end - start);
+    copy = malloc(len + 1);
+    if (!copy)
+        return NULL;
+
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static char *dup_text(const char *text) {
+    return text ? slice_range_dup(text, text + strlen(text)) : NULL;
+}
+
+static int split_top_level_comma(const char *text, char **left, char **right) {
+    int depth = 0;
+
+    *left = NULL;
+    *right = NULL;
+
+    for (const char *it = text; *it; it++) {
+        if (*it == '[')
+            depth++;
+        else if (*it == ']')
+            depth--;
+        else if (*it == ',' && depth == 0) {
+            *left = slice_range_dup(text, it);
+            *right = dup_text(it + 1);
+            return *left && *right;
+        }
+    }
+
+    return 0;
+}
+
+static int is_option_type(Type *type) {
+    return type && type->kind == TYPE_NAMED && type_name_has_form(type->name, "Option");
+}
+
+static int is_result_type(Type *type) {
+    return type && type->kind == TYPE_NAMED && type_name_has_form(type->name, "Result");
+}
+
+static char *option_inner_name(Type *type) {
+    if (!is_option_type(type))
+        return NULL;
+    return slice_range_dup(type->name + 7, type->name + strlen(type->name) - 1);
+}
+
+static int result_inner_names(Type *type, char **ok_name, char **err_name) {
+    char *inner;
+    int ok;
+
+    *ok_name = NULL;
+    *err_name = NULL;
+    if (!is_result_type(type))
+        return 0;
+
+    inner = slice_range_dup(type->name + 7, type->name + strlen(type->name) - 1);
+    if (!inner)
+        return 0;
+    ok = split_top_level_comma(inner, ok_name, err_name);
+    free(inner);
+    return ok;
+}
+
+static Type *type_from_name_text(Checker *c, const char *name) {
+    Node fake = {0};
+    fake.kind = NODE_TYPE_NAMED;
+    fake.as.type_named.name = (char *)name;
+    return type_from_ast(c, &fake);
+}
+
+static int is_option_constructor_expr(Node *expr) {
+    if (!expr)
+        return 0;
+    if (expr->kind == NODE_IDENT && !strcmp(expr->as.ident.name, "None"))
+        return 1;
+    return expr->kind == NODE_CALL &&
+           expr->as.call.callee &&
+           expr->as.call.callee->kind == NODE_IDENT &&
+           !strcmp(expr->as.call.callee->as.ident.name, "Some");
+}
+
+static int is_result_constructor_expr(Node *expr) {
+    if (!expr || expr->kind != NODE_CALL || !expr->as.call.callee ||
+        expr->as.call.callee->kind != NODE_IDENT)
+        return 0;
+    return !strcmp(expr->as.call.callee->as.ident.name, "Ok") ||
+           !strcmp(expr->as.call.callee->as.ident.name, "Err");
+}
+
+static int check_contextual_constructor(Checker *c, Scope *scope, Type *expected, Node *expr,
+                                        int unsafe_depth, Type **out_type) {
+    char expected_buf[128];
+    char actual_buf[128];
+
+    if (is_option_type(expected) && is_option_constructor_expr(expr)) {
+        if (expr->kind == NODE_IDENT) {
+            *out_type = expected;
+            return 1;
+        }
+
+        if (expr->as.call.args.count != 1) {
+            typeck_error(c, expr->line, expr->col, "Some expects 1 argument, got %d",
+                         expr->as.call.args.count);
+            *out_type = &TYPE_ERROR_VALUE;
+            return 1;
+        }
+
+        {
+            char *inner_name = option_inner_name(expected);
+            Type *inner_type = inner_name ? type_from_name_text(c, inner_name) : &TYPE_ERROR_VALUE;
+            Type *actual_type = check_expr(c, scope, expr->as.call.args.items[0], unsafe_depth);
+            if (!is_assignable(inner_type, actual_type)) {
+                format_type(inner_type, expected_buf, sizeof(expected_buf));
+                format_type(actual_type, actual_buf, sizeof(actual_buf));
+                typeck_error(c, expr->line, expr->col,
+                             "Some value type mismatch: expected %s, got %s",
+                             expected_buf, actual_buf);
+                *out_type = &TYPE_ERROR_VALUE;
+                return 1;
+            }
+        }
+
+        *out_type = expected;
+        return 1;
+    }
+
+    if (is_result_type(expected) && is_result_constructor_expr(expr)) {
+        char *ok_name = NULL;
+        char *err_name = NULL;
+        const char *ctor_name = expr->as.call.callee->as.ident.name;
+        Type *inner_type;
+        Type *actual_type;
+
+        if (expr->as.call.args.count != 1) {
+            typeck_error(c, expr->line, expr->col, "%s expects 1 argument, got %d",
+                         ctor_name, expr->as.call.args.count);
+            *out_type = &TYPE_ERROR_VALUE;
+            return 1;
+        }
+
+        if (!result_inner_names(expected, &ok_name, &err_name)) {
+            *out_type = &TYPE_ERROR_VALUE;
+            return 1;
+        }
+
+        inner_type = !strcmp(ctor_name, "Ok") ? type_from_name_text(c, ok_name)
+                                               : type_from_name_text(c, err_name);
+        actual_type = check_expr(c, scope, expr->as.call.args.items[0], unsafe_depth);
+
+        if (!is_assignable(inner_type, actual_type)) {
+            format_type(inner_type, expected_buf, sizeof(expected_buf));
+            format_type(actual_type, actual_buf, sizeof(actual_buf));
+            typeck_error(c, expr->line, expr->col,
+                         "%s value type mismatch: expected %s, got %s",
+                         ctor_name, expected_buf, actual_buf);
+            *out_type = &TYPE_ERROR_VALUE;
+            return 1;
+        }
+
+        *out_type = expected;
+        return 1;
+    }
+
+    return 0;
+}
+
 static int composite_has_field(Node *decl, const char *field, Node **field_node) {
     NodeList *fields = NULL;
 
@@ -515,7 +709,10 @@ static int check_call_arguments(Checker *c, NodeList *params, int start_index,
 
     for (int i = 0; i < expected; i++) {
         Type *expected_type = type_from_ast(c, params->items[i + start_index]->as.let.type);
-        Type *actual_type = check_expr(c, scope, args->items[i], unsafe_depth);
+        Type *actual_type = NULL;
+
+        if (!check_contextual_constructor(c, scope, expected_type, args->items[i], unsafe_depth, &actual_type))
+            actual_type = check_expr(c, scope, args->items[i], unsafe_depth);
         if (!is_assignable(expected_type, actual_type)) {
             format_type(expected_type, expected_buf, sizeof(expected_buf));
             format_type(actual_type, actual_buf, sizeof(actual_buf));
@@ -564,20 +761,24 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
     int saw_wildcard = 0;
     const char *seen_variants[256];
     int seen_count = 0;
+    int subject_is_option = is_option_type(subject_type);
+    int subject_is_result = is_result_type(subject_type);
 
     if (!(subject_type->kind == TYPE_NAMED)) {
         format_type(subject_type, actual_buf, sizeof(actual_buf));
         typeck_error(c, expr->line, expr->col,
-                     "match subject must be an enum, got %s", actual_buf);
+                     "match subject must be an enum, Option, or Result, got %s", actual_buf);
         return &TYPE_ERROR_VALUE;
     }
 
-    enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
-                                subject_type->name, NODE_ENUM_DECL);
-    if (!enum_decl) {
+    if (!subject_is_option && !subject_is_result) {
+        enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
+                                    subject_type->name, NODE_ENUM_DECL);
+    }
+    if (!subject_is_option && !subject_is_result && !enum_decl) {
         format_type(subject_type, actual_buf, sizeof(actual_buf));
         typeck_error(c, expr->line, expr->col,
-                     "match subject must be an enum, got %s", actual_buf);
+                     "match subject must be an enum, Option, or Result, got %s", actual_buf);
         return &TYPE_ERROR_VALUE;
     }
 
@@ -597,24 +798,52 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
             char enum_name[128];
             const char *variant_name;
 
-            if (!dot) return &TYPE_ERROR_VALUE;
-            memcpy(enum_name, pattern, (size_t)(dot - pattern));
-            enum_name[dot - pattern] = '\0';
-            variant_name = dot + 1;
+            if (subject_is_option || subject_is_result) {
+                variant_name = pattern;
 
-            if (!(subject_type->kind == TYPE_NAMED && !strcmp(subject_type->name, enum_name))) {
-                format_type(subject_type, actual_buf, sizeof(actual_buf));
-                typeck_error(c, expr->line, expr->col,
-                             "match arm '%s' does not match subject type %s",
-                             pattern, actual_buf);
-                return &TYPE_ERROR_VALUE;
+                if (subject_is_option &&
+                    strcmp(variant_name, "Some") &&
+                    strcmp(variant_name, "None")) {
+                    typeck_error(c, expr->line, expr->col,
+                                 "match arm '%s' does not match subject type %s",
+                                 pattern, subject_type->name);
+                    return &TYPE_ERROR_VALUE;
+                }
+
+                if (subject_is_result &&
+                    strcmp(variant_name, "Ok") &&
+                    strcmp(variant_name, "Err")) {
+                    typeck_error(c, expr->line, expr->col,
+                                 "match arm '%s' does not match subject type %s",
+                                 pattern, subject_type->name);
+                    return &TYPE_ERROR_VALUE;
+                }
+            } else {
+                if (!dot) return &TYPE_ERROR_VALUE;
+                memcpy(enum_name, pattern, (size_t)(dot - pattern));
+                enum_name[dot - pattern] = '\0';
+                variant_name = dot + 1;
+
+                if (!(subject_type->kind == TYPE_NAMED && !strcmp(subject_type->name, enum_name))) {
+                    format_type(subject_type, actual_buf, sizeof(actual_buf));
+                    typeck_error(c, expr->line, expr->col,
+                                 "match arm '%s' does not match subject type %s",
+                                 pattern, actual_buf);
+                    return &TYPE_ERROR_VALUE;
+                }
             }
 
             for (int j = 0; j < seen_count; j++) {
                 if (!strcmp(seen_variants[j], variant_name)) {
-                    typeck_error(c, expr->line, expr->col,
-                                 "duplicate match arm '%s.%s'",
-                                 enum_name, variant_name);
+                    if (subject_is_option || subject_is_result) {
+                        typeck_error(c, expr->line, expr->col,
+                                     "duplicate match arm '%s'",
+                                     variant_name);
+                    } else {
+                        typeck_error(c, expr->line, expr->col,
+                                     "duplicate match arm '%s.%s'",
+                                     enum_name, variant_name);
+                    }
                     return &TYPE_ERROR_VALUE;
                 }
             }
@@ -636,7 +865,7 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
         }
     }
 
-    if (!saw_wildcard) {
+    if (!saw_wildcard && enum_decl) {
         for (int i = 0; i < enum_decl->as.enum_decl.count; i++) {
             const char *variant_name = enum_decl->as.enum_decl.variants[i];
             int seen = 0;
@@ -655,6 +884,48 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
         }
     }
 
+    if (!saw_wildcard && subject_is_option) {
+        int has_some = 0;
+        int has_none = 0;
+        for (int i = 0; i < seen_count; i++) {
+            if (!strcmp(seen_variants[i], "Some"))
+                has_some = 1;
+            if (!strcmp(seen_variants[i], "None"))
+                has_none = 1;
+        }
+        if (!has_some) {
+            typeck_error(c, expr->line, expr->col,
+                         "non-exhaustive match for Option: missing Some");
+            return &TYPE_ERROR_VALUE;
+        }
+        if (!has_none) {
+            typeck_error(c, expr->line, expr->col,
+                         "non-exhaustive match for Option: missing None");
+            return &TYPE_ERROR_VALUE;
+        }
+    }
+
+    if (!saw_wildcard && subject_is_result) {
+        int has_ok = 0;
+        int has_err = 0;
+        for (int i = 0; i < seen_count; i++) {
+            if (!strcmp(seen_variants[i], "Ok"))
+                has_ok = 1;
+            if (!strcmp(seen_variants[i], "Err"))
+                has_err = 1;
+        }
+        if (!has_ok) {
+            typeck_error(c, expr->line, expr->col,
+                         "non-exhaustive match for Result: missing Ok");
+            return &TYPE_ERROR_VALUE;
+        }
+        if (!has_err) {
+            typeck_error(c, expr->line, expr->col,
+                         "non-exhaustive match for Result: missing Err");
+            return &TYPE_ERROR_VALUE;
+        }
+    }
+
     return result_type ? result_type : &TYPE_ERROR_VALUE;
 }
 
@@ -667,6 +938,8 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
     switch (expr->kind) {
         case NODE_LIT_INT:
             return &TYPE_INT_LIT_VALUE;
+        case NODE_LIT_CHAR:
+            return &TYPE_CHAR_VALUE;
         case NODE_LIT_FLOAT:
             return &TYPE_FLOAT_LIT_VALUE;
         case NODE_LIT_STRING:
@@ -681,6 +954,12 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
             Node *fn;
 
             if (binding) return binding->type;
+
+            if (!strcmp(expr->as.ident.name, "None")) {
+                typeck_error(c, expr->line, expr->col,
+                             "cannot infer Option type for None without context");
+                return &TYPE_ERROR_VALUE;
+            }
 
             fn = find_named_node(c->sema->functions, c->sema->function_count,
                                  expr->as.ident.name, NODE_FN_DECL);
@@ -876,6 +1155,16 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
         case NODE_CALL: {
             Node *callee = expr->as.call.callee;
             Type *callee_type;
+
+            if (callee->kind == NODE_IDENT &&
+                (!strcmp(callee->as.ident.name, "Some") ||
+                 !strcmp(callee->as.ident.name, "Ok") ||
+                 !strcmp(callee->as.ident.name, "Err"))) {
+                typeck_error(c, expr->line, expr->col,
+                             "cannot infer container type for %s without context",
+                             callee->as.ident.name);
+                return &TYPE_ERROR_VALUE;
+            }
 
             if (callee->kind == NODE_FIELD) {
                 Node *object = callee->as.field.object;
@@ -1132,7 +1421,14 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
     switch (stmt->kind) {
         case NODE_LET:
             declared = stmt->as.let.type ? type_from_ast(c, stmt->as.let.type) : NULL;
-            actual = stmt->as.let.value ? check_expr(c, scope, stmt->as.let.value, unsafe_depth) : NULL;
+            actual = NULL;
+            if (stmt->as.let.value) {
+                if (!declared || !check_contextual_constructor(c, scope, declared,
+                                                               stmt->as.let.value, unsafe_depth,
+                                                               &actual)) {
+                    actual = check_expr(c, scope, stmt->as.let.value, unsafe_depth);
+                }
+            }
 
             if (!declared && !actual) {
                 typeck_error(c, stmt->line, stmt->col,
@@ -1167,7 +1463,12 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
 
         case NODE_CONST:
             declared = stmt->as.konst.type ? type_from_ast(c, stmt->as.konst.type) : NULL;
-            actual = check_expr(c, scope, stmt->as.konst.value, unsafe_depth);
+            actual = NULL;
+            if (!declared || !check_contextual_constructor(c, scope, declared,
+                                                           stmt->as.konst.value, unsafe_depth,
+                                                           &actual)) {
+                actual = check_expr(c, scope, stmt->as.konst.value, unsafe_depth);
+            }
 
             if (!declared)
                 declared = widen_literal(actual);
@@ -1209,7 +1510,12 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
                 return 0;
             }
 
-            actual = check_expr(c, scope, stmt->as.ret.value, unsafe_depth);
+            actual = NULL;
+            if (!check_contextual_constructor(c, scope, expected_return,
+                                              stmt->as.ret.value, unsafe_depth,
+                                              &actual)) {
+                actual = check_expr(c, scope, stmt->as.ret.value, unsafe_depth);
+            }
             if (!is_assignable(expected_return, actual)) {
                 format_type(expected_return, expected_buf, sizeof(expected_buf));
                 format_type(actual, actual_buf, sizeof(actual_buf));

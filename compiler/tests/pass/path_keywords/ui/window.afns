@@ -1,0 +1,5 @@
+package ui.window;
+
+fn noop_ui() -> i32 {
+    return 0;
+}

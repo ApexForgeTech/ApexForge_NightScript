@@ -1,0 +1,6 @@
+package some_without_context_case;
+
+fn main() -> i32 {
+    let value = Some(1);
+    return 0;
+}

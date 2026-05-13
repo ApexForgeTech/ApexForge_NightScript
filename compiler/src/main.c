@@ -20,7 +20,20 @@ typedef enum {
     CMD_CHECK,
     CMD_BUILD,
     CMD_RUN,
+    CMD_FMT,
+    CMD_INIT,
+    CMD_CLEAN,
 } Command;
+
+typedef struct {
+    char *root_dir;
+    char *package_name;
+    char *target_mode;
+    char *target_arch;
+    char *target_backend;
+    char *entry;
+    char *output;
+} ProjectConfig;
 
 typedef struct {
     char *path;
@@ -80,7 +93,10 @@ static void print_usage(void) {
             "  night ast <file.afns>\n"
             "  night check <file.afns>\n"
             "  night build <file.afns> [-o output]\n"
-            "  night run <file.afns> [-o output]\n");
+            "  night run <file.afns> [-o output]\n"
+            "  night fmt [file.afns|project-dir]\n"
+            "  night init [dir]\n"
+            "  night clean [file.afns|project-dir]\n");
 }
 
 static char *replace_extension(const char *path, const char *ext) {
@@ -224,10 +240,482 @@ static char *path_join(const char *dir, const char *name) {
     return out;
 }
 
+static int path_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static int path_is_dir(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static char *path_basename_dup(const char *path) {
+    const char *slash = strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    return dup_string(name);
+}
+
+static int mkdir_if_missing(const char *path) {
+    if (mkdir(path, 0777) == 0)
+        return 1;
+    if (errno == EEXIST && path_is_dir(path))
+        return 1;
+    fprintf(stderr, "error: cannot create directory '%s': %s\n", path, strerror(errno));
+    return 0;
+}
+
+static int ensure_parent_dir(const char *path) {
+    char *dir = path_dirname(path);
+    int ok;
+
+    if (!dir) {
+        fprintf(stderr, "error: out of memory\n");
+        return 0;
+    }
+
+    if (!strcmp(dir, ".") || !strcmp(dir, "/")) {
+        free(dir);
+        return 1;
+    }
+
+    ok = mkdir_if_missing(dir);
+    free(dir);
+    return ok;
+}
+
+static void project_config_free(ProjectConfig *cfg) {
+    if (!cfg)
+        return;
+    free(cfg->root_dir);
+    free(cfg->package_name);
+    free(cfg->target_mode);
+    free(cfg->target_arch);
+    free(cfg->target_backend);
+    free(cfg->entry);
+    free(cfg->output);
+    memset(cfg, 0, sizeof(*cfg));
+}
+
+static char *trim_ascii(char *text) {
+    char *start = text;
+    char *end;
+
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        start++;
+
+    end = start + strlen(start);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = '\0';
+
+    return start;
+}
+
+static int parse_toml_string(const char *value, char **out) {
+    const char *start;
+    const char *end;
+    size_t len;
+    char *copy;
+
+    if (!value || value[0] != '"')
+        return 0;
+
+    start = value + 1;
+    end = strrchr(start, '"');
+    if (!end)
+        return 0;
+
+    len = (size_t)(end - start);
+    copy = malloc(len + 1);
+    if (!copy)
+        return 0;
+
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+    free(*out);
+    *out = copy;
+    return 1;
+}
+
+static int parse_project_config(const char *project_dir, ProjectConfig *cfg) {
+    char *toml_path = NULL;
+    char *text = NULL;
+    char *cursor;
+    char section[32] = "";
+    int ok = 0;
+
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->root_dir = dup_string(project_dir);
+    if (!cfg->root_dir) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    toml_path = path_join(project_dir, "night.toml");
+    if (!toml_path) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    text = read_file(toml_path);
+    if (!text)
+        goto cleanup;
+
+    cursor = text;
+    while (*cursor) {
+        char *line = cursor;
+        char *eq;
+        char *key;
+        char *value;
+        char *next = strchr(cursor, '\n');
+
+        if (next) {
+            *next = '\0';
+            cursor = next + 1;
+        } else {
+            cursor += strlen(cursor);
+        }
+
+        if (strchr(line, '#'))
+            *strchr(line, '#') = '\0';
+        line = trim_ascii(line);
+        if (!line[0])
+            continue;
+
+        if (line[0] == '[') {
+            char *close = strchr(line, ']');
+            size_t len;
+            if (!close) {
+                fprintf(stderr, "error: malformed section header in '%s'\n", toml_path);
+                goto cleanup;
+            }
+            len = (size_t)(close - line - 1);
+            if (len >= sizeof(section))
+                len = sizeof(section) - 1;
+            memcpy(section, line + 1, len);
+            section[len] = '\0';
+            continue;
+        }
+
+        eq = strchr(line, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+        key = trim_ascii(line);
+        value = trim_ascii(eq + 1);
+
+        if (!strcmp(section, "package") && !strcmp(key, "name")) {
+            if (!parse_toml_string(value, &cfg->package_name)) {
+                fprintf(stderr, "error: invalid package.name in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        } else if (!strcmp(section, "target") && !strcmp(key, "mode")) {
+            if (!parse_toml_string(value, &cfg->target_mode)) {
+                fprintf(stderr, "error: invalid target.mode in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        } else if (!strcmp(section, "target") && !strcmp(key, "arch")) {
+            if (!parse_toml_string(value, &cfg->target_arch)) {
+                fprintf(stderr, "error: invalid target.arch in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        } else if (!strcmp(section, "target") && !strcmp(key, "backend")) {
+            if (!parse_toml_string(value, &cfg->target_backend)) {
+                fprintf(stderr, "error: invalid target.backend in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        } else if (!strcmp(section, "build") && !strcmp(key, "entry")) {
+            if (!parse_toml_string(value, &cfg->entry)) {
+                fprintf(stderr, "error: invalid build.entry in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        } else if (!strcmp(section, "build") && !strcmp(key, "output")) {
+            if (!parse_toml_string(value, &cfg->output)) {
+                fprintf(stderr, "error: invalid build.output in '%s'\n", toml_path);
+                goto cleanup;
+            }
+        }
+    }
+
+    if (!cfg->entry)
+        cfg->entry = dup_string("src/main.afns");
+    if (!cfg->package_name)
+        cfg->package_name = path_basename_dup(project_dir);
+    if (!cfg->target_mode)
+        cfg->target_mode = dup_string("native");
+    if (!cfg->target_backend)
+        cfg->target_backend = dup_string("c");
+    if (!cfg->output && cfg->package_name)
+        cfg->output = dup_string(cfg->package_name);
+
+    if (!cfg->entry || !cfg->package_name || !cfg->target_mode ||
+        !cfg->target_backend || !cfg->output) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    free(toml_path);
+    free(text);
+    if (!ok)
+        project_config_free(cfg);
+    return ok;
+}
+
+static char *resolve_project_entry(const ProjectConfig *cfg) {
+    return path_join(cfg->root_dir, cfg->entry);
+}
+
+static char *resolve_project_output(const ProjectConfig *cfg) {
+    return path_join(cfg->root_dir, cfg->output);
+}
+
+static int resolve_input_path(Command cmd, const char *input, char **resolved_path, char **resolved_output) {
+    ProjectConfig cfg;
+    const char *project_dir = input;
+    char *entry = NULL;
+    char *output = NULL;
+
+    *resolved_path = NULL;
+    *resolved_output = NULL;
+
+    if (input && !path_is_dir(input)) {
+        *resolved_path = dup_string(input);
+        if (!*resolved_path) {
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        return 1;
+    }
+
+    if (!project_dir)
+        project_dir = ".";
+
+    if (!parse_project_config(project_dir, &cfg))
+        return 0;
+
+    entry = resolve_project_entry(&cfg);
+    if (!entry) {
+        fprintf(stderr, "error: out of memory\n");
+        project_config_free(&cfg);
+        return 0;
+    }
+
+    if (cmd == CMD_BUILD || cmd == CMD_RUN || cmd == CMD_CLEAN) {
+        output = resolve_project_output(&cfg);
+        if (!output) {
+            fprintf(stderr, "error: out of memory\n");
+            free(entry);
+            project_config_free(&cfg);
+            return 0;
+        }
+    }
+
+    *resolved_path = entry;
+    *resolved_output = output;
+    project_config_free(&cfg);
+    return 1;
+}
+
 static int compare_strings(const void *lhs, const void *rhs) {
     const char *const *a = lhs;
     const char *const *b = rhs;
     return strcmp(*a, *b);
+}
+
+static int write_text_file(const char *path, const char *text);
+
+static int write_if_changed(const char *path, const char *text) {
+    char *existing = NULL;
+    int ok = 1;
+
+    if (path_exists(path)) {
+        existing = read_file(path);
+        if (existing && !strcmp(existing, text)) {
+            free(existing);
+            return 1;
+        }
+        free(existing);
+    }
+
+    ok = write_text_file(path, text);
+    return ok;
+}
+
+static int format_source_file(const char *path) {
+    char *text = read_file(path);
+    char *out = NULL;
+    size_t len;
+    size_t cap;
+    size_t out_len = 0;
+    int ok = 0;
+
+    if (!text)
+        return 0;
+
+    len = strlen(text);
+    cap = len + 2;
+    out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    for (size_t i = 0; i < len;) {
+        size_t start = i;
+        size_t end;
+
+        while (i < len && text[i] != '\n')
+            i++;
+        end = i;
+        while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\r'))
+            end--;
+        if (out_len + (end - start) + 2 >= cap) {
+            size_t new_cap = cap * 2 + (end - start) + 2;
+            char *new_out = realloc(out, new_cap);
+            if (!new_out) {
+                fprintf(stderr, "error: out of memory\n");
+                goto cleanup;
+            }
+            out = new_out;
+            cap = new_cap;
+        }
+        memcpy(out + out_len, text + start, end - start);
+        out_len += end - start;
+        out[out_len++] = '\n';
+        if (i < len && text[i] == '\n')
+            i++;
+    }
+
+    while (out_len > 1 && out[out_len - 1] == '\n' && out[out_len - 2] == '\n')
+        out_len--;
+    out[out_len] = '\0';
+
+    ok = write_if_changed(path, out);
+
+cleanup:
+    free(text);
+    free(out);
+    return ok;
+}
+
+static int init_project(const char *target_dir) {
+    char *src_dir = NULL;
+    char *toml_path = NULL;
+    char *main_path = NULL;
+    char *pkg_name = NULL;
+    char *toml = NULL;
+    int ok = 0;
+    size_t needed;
+
+    if (!mkdir_if_missing(target_dir))
+        return 0;
+
+    src_dir = path_join(target_dir, "src");
+    toml_path = path_join(target_dir, "night.toml");
+    main_path = path_join(target_dir, "src/main.afns");
+    pkg_name = path_basename_dup(target_dir);
+    if (!src_dir || !toml_path || !main_path || !pkg_name) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    if (!mkdir_if_missing(src_dir))
+        goto cleanup;
+
+    needed = strlen(pkg_name) * 2 + 192;
+    toml = malloc(needed);
+    if (!toml) {
+        fprintf(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
+
+    snprintf(toml, needed,
+             "[package]\n"
+             "name = \"%s\"\n"
+             "\n"
+             "[target]\n"
+             "mode = \"native\"\n"
+             "backend = \"c\"\n"
+             "\n"
+             "[build]\n"
+             "entry = \"src/main.afns\"\n"
+             "output = \"%s\"\n",
+             pkg_name, pkg_name);
+
+    if (!write_if_changed(toml_path, toml))
+        goto cleanup;
+
+    if (!write_if_changed(main_path,
+                          "package main;\n\n"
+                          "fn main() -> i32 {\n"
+                          "    return 0;\n"
+                          "}\n")) {
+        goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    free(src_dir);
+    free(toml_path);
+    free(main_path);
+    free(pkg_name);
+    free(toml);
+    return ok;
+}
+
+static int remove_if_exists(const char *path) {
+    if (remove(path) == 0)
+        return 1;
+    if (errno == ENOENT)
+        return 1;
+    fprintf(stderr, "error: cannot remove '%s': %s\n", path, strerror(errno));
+    return 0;
+}
+
+static int clean_outputs(const char *src_path, const char *output_path) {
+    char *generated = NULL;
+    int ok = 0;
+
+    if (output_path) {
+        generated = replace_extension(output_path, ".generated.c");
+        if (!generated) {
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        if (!remove_if_exists(output_path))
+            goto cleanup;
+        if (!remove_if_exists(generated))
+            goto cleanup;
+        ok = 1;
+        goto cleanup;
+    }
+
+    if (src_path) {
+        char *default_out = replace_extension(src_path, "");
+        if (!default_out) {
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        generated = replace_extension(default_out, ".generated.c");
+        if (!generated) {
+            free(default_out);
+            fprintf(stderr, "error: out of memory\n");
+            return 0;
+        }
+        ok = remove_if_exists(default_out) && remove_if_exists(generated);
+        free(default_out);
+        goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    free(generated);
+    return ok;
 }
 
 static int collect_package_files(const char *entry_path, char ***out_paths, int *out_count) {
@@ -518,6 +1006,9 @@ static int build_binary(const char *src_path, const char *binary_path) {
         goto cleanup;
     }
 
+    if (!ensure_parent_dir(binary_path) || !ensure_parent_dir(c_path))
+        goto cleanup;
+
     if (!write_text_file(c_path, state.codegen.buf))
         goto cleanup;
 
@@ -536,6 +1027,8 @@ int main(int argc, char **argv) {
     Command cmd = CMD_CODEGEN;
     const char *path = NULL;
     const char *output_path = NULL;
+    char *resolved_path = NULL;
+    char *resolved_output = NULL;
     int argi = 1;
 
     if (argc < 2) {
@@ -558,14 +1051,24 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[argi], "run")) {
         cmd = CMD_RUN;
         argi++;
+    } else if (!strcmp(argv[argi], "fmt")) {
+        cmd = CMD_FMT;
+        argi++;
+    } else if (!strcmp(argv[argi], "init")) {
+        cmd = CMD_INIT;
+        argi++;
+    } else if (!strcmp(argv[argi], "clean")) {
+        cmd = CMD_CLEAN;
+        argi++;
     }
 
-    if (argi >= argc) {
-        print_usage();
-        return 1;
-    }
+    if (argi < argc)
+        path = argv[argi++];
 
-    path = argv[argi++];
+    if (cmd == CMD_INIT) {
+        const char *target_dir = path ? path : ".";
+        return init_project(target_dir) ? 0 : 1;
+    }
 
     while (argi < argc) {
         if (!strcmp(argv[argi], "-o")) {
@@ -589,6 +1092,36 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (cmd == CMD_FMT) {
+        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
+            return 1;
+        free(resolved_output);
+        resolved_output = NULL;
+        path = resolved_path;
+        {
+            int rc = format_source_file(path) ? 0 : 1;
+            free(resolved_path);
+            return rc;
+        }
+    }
+
+    if (cmd == CMD_CLEAN) {
+        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
+            return 1;
+        {
+            int rc = clean_outputs(resolved_path, resolved_output) ? 0 : 1;
+            free(resolved_path);
+            free(resolved_output);
+            return rc;
+        }
+    }
+
+    if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
+        return 1;
+    path = resolved_path;
+    if (!output_path && resolved_output)
+        output_path = resolved_output;
+
     if (cmd == CMD_BUILD || cmd == CMD_RUN) {
         char *default_out = NULL;
         char *quoted_out = NULL;
@@ -599,6 +1132,8 @@ int main(int argc, char **argv) {
             default_out = replace_extension(path, "");
             if (!default_out) {
                 fprintf(stderr, "error: out of memory\n");
+                free(resolved_path);
+                free(resolved_output);
                 return 1;
             }
             output_path = default_out;
@@ -607,6 +1142,8 @@ int main(int argc, char **argv) {
         rc = build_binary(path, output_path);
         if (rc != 0) {
             free(default_out);
+            free(resolved_path);
+            free(resolved_output);
             return rc;
         }
 
@@ -615,6 +1152,8 @@ int main(int argc, char **argv) {
             if (!quoted_out) {
                 fprintf(stderr, "error: out of memory\n");
                 free(default_out);
+                free(resolved_path);
+                free(resolved_output);
                 return 1;
             }
 
@@ -623,6 +1162,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "error: out of memory\n");
                 free(quoted_out);
                 free(default_out);
+                free(resolved_path);
+                free(resolved_output);
                 return 1;
             }
 
@@ -631,10 +1172,14 @@ int main(int argc, char **argv) {
             free(run_cmd);
             free(quoted_out);
             free(default_out);
+            free(resolved_path);
+            free(resolved_output);
             return rc == 0 ? 0 : 1;
         }
 
         free(default_out);
+        free(resolved_path);
+        free(resolved_output);
         return 0;
     }
 
@@ -654,6 +1199,8 @@ int main(int argc, char **argv) {
         }
 
         compile_state_free(&state);
+        free(resolved_path);
+        free(resolved_output);
         return rc;
     }
 }

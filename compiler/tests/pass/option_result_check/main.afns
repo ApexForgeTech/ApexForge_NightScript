@@ -1,0 +1,33 @@
+package test;
+
+enum Error {
+    Bad;
+}
+
+fn takes(v: Option[i32], r: Result[i32, Error]) -> i32 {
+    let _v: Option[i32] = v;
+    let _r: Result[i32, Error] = r;
+    return 0;
+}
+
+fn maybe(v: i32) -> Option[i32] {
+    if v > 0 {
+        return Some(v);
+    }
+    return None;
+}
+
+fn work(ok: bool) -> Result[i32, Error] {
+    if ok {
+        return Ok(7);
+    }
+    return Err(Error.Bad);
+}
+
+fn main() -> i32 {
+    let a: Option[i32] = Some(1);
+    let b: Option[i32] = None;
+    let r: Result[i32, Error] = work(true);
+    takes(a, r);
+    return 0;
+}

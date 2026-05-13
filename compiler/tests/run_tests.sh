@@ -5,7 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPILER_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PASS_DIR="$SCRIPT_DIR/pass"
 FAIL_DIR="$SCRIPT_DIR/fail"
-NIGHT="$COMPILER_DIR/night"
+NIGHT="$COMPILER_DIR/build/night"
 TMP_DIR=$(mktemp -d)
 
 cleanup() {
@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..24\n'
+printf '1..35\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -118,24 +118,45 @@ run_capture "indexing codegen" "$NIGHT" codegen "$PASS_DIR/indexing/main.afns"
 assert_contains "$TMP_DIR/stdout" "s.ptr[i]" "slice index emission"
 printf 'ok 12 - array/slice indexing\n'
 
+run_capture "char literal check" "$NIGHT" check "$PASS_DIR/char_literal/main.afns"
+run_capture "char literal build" "$NIGHT" build "$PASS_DIR/char_literal/main.afns" -o "$TMP_DIR/char_bin"
+run_capture "char literal run" "$NIGHT" run "$PASS_DIR/char_literal/main.afns" -o "$TMP_DIR/char_run"
+if ! printf 'A' | cmp -s - "$TMP_DIR/stdout"; then
+    printf 'Expected output:\nA' >&2
+    printf '\nActual output:\n' >&2
+    cat "$TMP_DIR/stdout" >&2
+    fail "char literal run output mismatch"
+fi
+printf 'ok 13 - char literal\n'
+
+run_capture "const while check" "$NIGHT" check "$PASS_DIR/const_while/main.afns"
+run_capture "const while run" "$NIGHT" run "$PASS_DIR/const_while/main.afns" -o "$TMP_DIR/const_while_run"
+assert_contains "$TMP_DIR/stdout" "ok" "const while run"
+printf 'ok 14 - const declaration and while loop\n'
+
+run_capture "const ptr check" "$NIGHT" check "$PASS_DIR/const_ptr/main.afns"
+run_capture "const ptr run" "$NIGHT" run "$PASS_DIR/const_ptr/main.afns" -o "$TMP_DIR/const_ptr_run"
+assert_contains "$TMP_DIR/stdout" "ok" "const ptr run"
+printf 'ok 15 - unsafe const pointer flow\n'
+
 run_capture "defer check" "$NIGHT" check "$PASS_DIR/defer_test/main.afns"
 run_capture "defer build" "$NIGHT" build "$PASS_DIR/defer_test/main.afns" -o "$TMP_DIR/defer_bin"
 run_capture "defer codegen" "$NIGHT" codegen "$PASS_DIR/defer_test/main.afns"
 assert_contains "$TMP_DIR/stdout" "puts(\"goodbye\")" "defer call emission"
-printf 'ok 13 - defer statement\n'
+printf 'ok 16 - defer statement\n'
 
 run_capture "for loop check" "$NIGHT" check "$PASS_DIR/for_loop/main.afns"
 run_capture "for loop build" "$NIGHT" build "$PASS_DIR/for_loop/main.afns" -o "$TMP_DIR/for_bin"
 run_capture "for loop codegen" "$NIGHT" codegen "$PASS_DIR/for_loop/main.afns"
 assert_contains "$TMP_DIR/stdout" "for (int32_t i = 0;" "for loop init emission"
 assert_contains "$TMP_DIR/stdout" "i += 1)" "for loop post emission"
-printf 'ok 14 - for loop\n'
+printf 'ok 17 - for loop\n'
 
 run_capture "packed struct check" "$NIGHT" check "$PASS_DIR/packed_struct/main.afns"
 run_capture "packed struct build" "$NIGHT" build "$PASS_DIR/packed_struct/main.afns" -o "$TMP_DIR/packed_bin"
 run_capture "packed struct codegen" "$NIGHT" codegen "$PASS_DIR/packed_struct/main.afns"
 assert_contains "$TMP_DIR/stdout" "__attribute__((packed))" "packed struct emission"
-printf 'ok 15 - packed struct\n'
+printf 'ok 18 - packed struct\n'
 
 run_capture "data enum constructor check" "$NIGHT" check "$PASS_DIR/data_enum_ctor/main.afns"
 run_capture "data enum constructor build" "$NIGHT" build "$PASS_DIR/data_enum_ctor/main.afns" -o "$TMP_DIR/data_enum_ctor_bin"
@@ -143,7 +164,7 @@ run_capture "data enum constructor run" "$NIGHT" run "$PASS_DIR/data_enum_ctor/m
 assert_contains "$TMP_DIR/stdout" "ok" "data enum constructor run"
 run_capture "data enum constructor codegen" "$NIGHT" codegen "$PASS_DIR/data_enum_ctor/main.afns"
 assert_contains "$TMP_DIR/stdout" ".tag = Event_Click" "data enum constructor codegen"
-printf 'ok 16 - data enum constructor\n'
+printf 'ok 19 - data enum constructor\n'
 
 run_capture "defer scope check" "$NIGHT" check "$PASS_DIR/defer_scope/main.afns"
 run_capture "defer scope run" "$NIGHT" run "$PASS_DIR/defer_scope/main.afns" -o "$TMP_DIR/defer_scope_run"
@@ -154,7 +175,7 @@ if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/defer_scope/main.out"; then
     cat "$TMP_DIR/stdout" >&2
     fail "defer scope run output mismatch"
 fi
-printf 'ok 17 - defer scope exit\n'
+printf 'ok 20 - defer scope exit\n'
 
 run_capture "defer control flow check" "$NIGHT" check "$PASS_DIR/defer_control_flow/main.afns"
 run_capture "defer control flow run" "$NIGHT" run "$PASS_DIR/defer_control_flow/main.afns" -o "$TMP_DIR/defer_control_flow_run"
@@ -165,22 +186,83 @@ if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/defer_control_flow/main.out"; then
     cat "$TMP_DIR/stdout" >&2
     fail "defer control flow run output mismatch"
 fi
-printf 'ok 18 - defer break and continue\n'
+printf 'ok 21 - defer break and continue\n'
 
 run_capture "keyword path check" "$NIGHT" check "$PASS_DIR/path_keywords/main.afns"
-printf 'ok 19 - keyword package and import paths\n'
+printf 'ok 22 - keyword package and import paths\n'
 
 run_fail_case "$FAIL_DIR/non_exhaustive_match.afns" "$FAIL_DIR/non_exhaustive_match.err" "non exhaustive match diagnostic"
-printf 'ok 20 - non exhaustive match diagnostic\n'
+printf 'ok 23 - non exhaustive match diagnostic\n'
 
 run_fail_case "$FAIL_DIR/duplicate_match_arm.afns" "$FAIL_DIR/duplicate_match_arm.err" "duplicate match arm diagnostic"
-printf 'ok 21 - duplicate match arm diagnostic\n'
+printf 'ok 24 - duplicate match arm diagnostic\n'
 
 run_fail_case "$FAIL_DIR/enum_ctor_bad_arity.afns" "$FAIL_DIR/enum_ctor_bad_arity.err" "enum constructor arity diagnostic"
-printf 'ok 22 - enum constructor arity diagnostic\n'
+printf 'ok 25 - enum constructor arity diagnostic\n'
 
 run_fail_case "$FAIL_DIR/enum_ctor_bad_type.afns" "$FAIL_DIR/enum_ctor_bad_type.err" "enum constructor type diagnostic"
-printf 'ok 23 - enum constructor type diagnostic\n'
+printf 'ok 26 - enum constructor type diagnostic\n'
 
 run_capture "legacy data enum check" "$NIGHT" check "$PASS_DIR/data_enum/main.afns"
-printf 'ok 24 - existing data enum program still checks\n'
+printf 'ok 27 - existing data enum program still checks\n'
+
+run_fail_case "$FAIL_DIR/import_missing.afns" "$FAIL_DIR/import_missing.err" "import missing diagnostic"
+printf 'ok 28 - import missing diagnostic\n'
+
+run_capture "option result check" "$NIGHT" check "$PASS_DIR/option_result_check/main.afns"
+run_capture "option result build" "$NIGHT" build "$PASS_DIR/option_result_check/main.afns" -o "$TMP_DIR/option_result_bin"
+run_capture "option result run" "$NIGHT" run "$PASS_DIR/option_result_check/main.afns" -o "$TMP_DIR/option_result_run"
+run_capture "option result codegen" "$NIGHT" codegen "$PASS_DIR/option_result_check/main.afns"
+assert_contains "$TMP_DIR/stdout" "typedef struct NS_Option_i32" "option typedef emission"
+assert_contains "$TMP_DIR/stdout" "typedef struct NS_Result_i32_Error" "result typedef emission"
+printf 'ok 29 - option result build and run\n'
+
+run_capture "option result match check" "$NIGHT" check "$PASS_DIR/option_result_match/main.afns"
+run_capture "option result match run" "$NIGHT" run "$PASS_DIR/option_result_match/main.afns" -o "$TMP_DIR/option_result_match_run"
+assert_contains "$TMP_DIR/stdout" "ok" "option result match run"
+printf 'ok 30 - option result match\n'
+
+run_fail_case "$FAIL_DIR/some_without_context.afns" "$FAIL_DIR/some_without_context.err" "some without context diagnostic"
+printf 'ok 31 - some without context diagnostic\n'
+
+run_fail_case "$FAIL_DIR/option_some_bad_type.afns" "$FAIL_DIR/option_some_bad_type.err" "option some bad type diagnostic"
+printf 'ok 32 - option some bad type diagnostic\n'
+
+cp "$PASS_DIR/fmt_input/main.afns" "$TMP_DIR/fmt_main.afns"
+run_capture "fmt command" "$NIGHT" fmt "$TMP_DIR/fmt_main.afns"
+if ! cmp -s "$TMP_DIR/fmt_main.afns" "$PASS_DIR/fmt_input/main.expected"; then
+    printf 'Expected formatted file:\n' >&2
+    cat "$PASS_DIR/fmt_input/main.expected" >&2
+    printf 'Actual formatted file:\n' >&2
+    cat "$TMP_DIR/fmt_main.afns" >&2
+    fail "fmt command output mismatch"
+fi
+printf 'ok 33 - fmt command\n'
+
+mkdir -p "$TMP_DIR/project_cli/src"
+cp "$PASS_DIR/project_cli/night.toml" "$TMP_DIR/project_cli/night.toml"
+cp "$PASS_DIR/project_cli/src/main.afns" "$TMP_DIR/project_cli/src/main.afns"
+run_capture "project check" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" check"
+run_capture "project build" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" build"
+run_capture "project run" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" run"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/project_cli/main.out"; then
+    printf 'Expected output:\n' >&2
+    cat "$PASS_DIR/project_cli/main.out" >&2
+    printf 'Actual output:\n' >&2
+    cat "$TMP_DIR/stdout" >&2
+    fail "project run output mismatch"
+fi
+run_capture "project clean" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" clean"
+if [ -e "$TMP_DIR/project_cli/project_cli_bin" ] || [ -e "$TMP_DIR/project_cli/project_cli_bin.generated.c" ]; then
+    fail "project clean did not remove build outputs"
+fi
+printf 'ok 34 - night.toml project flow\n'
+
+run_capture "init command" "$NIGHT" init "$TMP_DIR/init_proj"
+if [ ! -f "$TMP_DIR/init_proj/night.toml" ] || [ ! -f "$TMP_DIR/init_proj/src/main.afns" ]; then
+    fail "init command did not scaffold project"
+fi
+assert_contains "$TMP_DIR/init_proj/night.toml" "[target]" "init target section"
+assert_contains "$TMP_DIR/init_proj/night.toml" "mode = \"native\"" "init target mode"
+assert_contains "$TMP_DIR/init_proj/night.toml" "backend = \"c\"" "init target backend"
+printf 'ok 35 - init command\n'

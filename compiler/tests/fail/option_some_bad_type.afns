@@ -1,0 +1,6 @@
+package option_some_bad_type_case;
+
+fn main() -> i32 {
+    let value: Option[i32] = Some("bad");
+    return 0;
+}

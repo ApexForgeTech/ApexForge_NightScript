@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 typedef struct {
     const char *name;
@@ -84,6 +85,118 @@ static void sema_error(Analyzer *a, int line, int col, const char *fmt, ...) {
     a->had_error = 1;
 }
 
+static char *dup_string(const char *text) {
+    size_t len;
+    char *copy;
+
+    if (!text)
+        return NULL;
+
+    len = strlen(text);
+    copy = malloc(len + 1);
+    if (!copy)
+        return NULL;
+
+    memcpy(copy, text, len + 1);
+    return copy;
+}
+
+static char *path_dirname(const char *path) {
+    const char *slash = strrchr(path, '/');
+    size_t len;
+    char *out;
+
+    if (!slash)
+        return dup_string(".");
+
+    len = (size_t)(slash - path);
+    if (len == 0)
+        len = 1;
+
+    out = malloc(len + 1);
+    if (!out)
+        return NULL;
+
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return out;
+}
+
+static char *path_join(const char *dir, const char *name) {
+    size_t dir_len = strlen(dir);
+    size_t name_len = strlen(name);
+    int need_slash = dir_len > 0 && dir[dir_len - 1] != '/';
+    char *out = malloc(dir_len + name_len + (size_t)need_slash + 1);
+
+    if (!out)
+        return NULL;
+
+    memcpy(out, dir, dir_len);
+    if (need_slash)
+        out[dir_len++] = '/';
+    memcpy(out + dir_len, name, name_len);
+    out[dir_len + name_len] = '\0';
+    return out;
+}
+
+static int file_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int import_path_exists(Analyzer *a, const char *import_path) {
+    char *dir = NULL;
+    char *slash_path = NULL;
+    char *candidate = NULL;
+    char *candidate_main = NULL;
+    size_t len;
+    int ok = 0;
+
+    dir = path_dirname(a->source_name);
+    if (!dir)
+        return 0;
+
+    len = strlen(import_path);
+    slash_path = malloc(len + 1);
+    if (!slash_path)
+        goto cleanup;
+    memcpy(slash_path, import_path, len + 1);
+    for (size_t i = 0; i < len; i++) {
+        if (slash_path[i] == '.')
+            slash_path[i] = '/';
+    }
+
+    candidate = malloc(len + 6);
+    if (!candidate)
+        goto cleanup;
+    snprintf(candidate, len + 6, "%s.afns", slash_path);
+
+    candidate_main = malloc(len + 11);
+    if (!candidate_main)
+        goto cleanup;
+    snprintf(candidate_main, len + 11, "%s/main.afns", slash_path);
+
+    {
+        char *full = path_join(dir, candidate);
+        char *full_main = path_join(dir, candidate_main);
+        if (!full || !full_main) {
+            free(full);
+            free(full_main);
+            goto cleanup;
+        }
+        ok = file_exists(full) || file_exists(full_main);
+        free(full);
+        free(full_main);
+    }
+
+cleanup:
+    free(dir);
+    free(slash_path);
+    free(candidate);
+    free(candidate_main);
+    return ok;
+}
+
 static int push_named_decl(NamedDecl **items, int *count, int *cap,
                            const char *name, Node *node) {
     if (*count == *cap) {
@@ -155,6 +268,88 @@ static int is_known_type(Analyzer *a, const char *name) {
            find_named_decl(a->structs, a->struct_count, name) ||
            find_named_decl(a->enums, a->enum_count, name) ||
            find_named_decl(a->unions, a->union_count, name);
+}
+
+static int is_identifier_like_name(const char *name);
+
+static int type_name_has_form(const char *name, const char *prefix) {
+    size_t prefix_len;
+    size_t len;
+
+    if (!name || !prefix)
+        return 0;
+
+    prefix_len = strlen(prefix);
+    len = strlen(name);
+    return len > prefix_len + 1 &&
+           !strncmp(name, prefix, prefix_len) &&
+           name[prefix_len] == '[' &&
+           name[len - 1] == ']';
+}
+
+static char *slice_range_dup(const char *start, const char *end) {
+    size_t len;
+    char *copy;
+
+    if (!start || !end || end < start)
+        return NULL;
+
+    len = (size_t)(end - start);
+    copy = malloc(len + 1);
+    if (!copy)
+        return NULL;
+
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static int split_top_level_comma(const char *text, char **left, char **right) {
+    int depth = 0;
+
+    *left = NULL;
+    *right = NULL;
+
+    for (const char *it = text; *it; it++) {
+        if (*it == '[')
+            depth++;
+        else if (*it == ']')
+            depth--;
+        else if (*it == ',' && depth == 0) {
+            *left = slice_range_dup(text, it);
+            *right = dup_string(it + 1);
+            return *left && *right;
+        }
+    }
+
+    return 0;
+}
+
+static int validate_type_name(Analyzer *a, const char *name) {
+    if (!name)
+        return 0;
+
+    if (type_name_has_form(name, "Option")) {
+        char *inner = slice_range_dup(name + 7, name + strlen(name) - 1);
+        int ok = inner && validate_type_name(a, inner);
+        free(inner);
+        return ok;
+    }
+
+    if (type_name_has_form(name, "Result")) {
+        char *inner = slice_range_dup(name + 7, name + strlen(name) - 1);
+        char *ok_name = NULL;
+        char *err_name = NULL;
+        int ok = inner && split_top_level_comma(inner, &ok_name, &err_name) &&
+                 validate_type_name(a, ok_name) &&
+                 validate_type_name(a, err_name);
+        free(inner);
+        free(ok_name);
+        free(err_name);
+        return ok;
+    }
+
+    return is_identifier_like_name(name) && is_known_type(a, name);
 }
 
 static int register_global_name(Analyzer *a, const char *name, Node *node) {
@@ -271,8 +466,7 @@ static int validate_type(Analyzer *a, Node *type) {
 
     switch (type->kind) {
         case NODE_TYPE_NAMED:
-            if (!is_identifier_like_name(type->as.type_named.name) ||
-                !is_known_type(a, type->as.type_named.name)) {
+            if (!validate_type_name(a, type->as.type_named.name)) {
                 sema_error(a, type->line, type->col,
                            "unknown type '%s'", type->as.type_named.name);
                 return 0;
@@ -479,6 +673,10 @@ static int analyze_match_pattern(Analyzer *a, const char *pattern, int line, int
     if (!strcmp(pattern, "_"))
         return 1;
 
+    if (!strcmp(pattern, "Some") || !strcmp(pattern, "None") ||
+        !strcmp(pattern, "Ok") || !strcmp(pattern, "Err"))
+        return 1;
+
     dot = strchr(pattern, '.');
     if (!dot) {
         sema_error(a, line, col, "invalid match pattern '%s'", pattern);
@@ -519,6 +717,7 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
 
     switch (expr->kind) {
         case NODE_LIT_INT:
+        case NODE_LIT_CHAR:
         case NODE_LIT_FLOAT:
         case NODE_LIT_STRING:
         case NODE_LIT_BOOL:
@@ -526,6 +725,8 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
             return 1;
 
         case NODE_IDENT:
+            if (!strcmp(expr->as.ident.name, "None"))
+                return 1;
             if (!scope_resolve(scope, expr->as.ident.name)) {
                 sema_error(a, expr->line, expr->col,
                            "unknown symbol '%s'", expr->as.ident.name);
@@ -552,6 +753,17 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
                    analyze_expr(a, scope, expr->as.index_expr.index);
 
         case NODE_CALL:
+            if (expr->as.call.callee &&
+                expr->as.call.callee->kind == NODE_IDENT &&
+                (!strcmp(expr->as.call.callee->as.ident.name, "Some") ||
+                 !strcmp(expr->as.call.callee->as.ident.name, "Ok") ||
+                 !strcmp(expr->as.call.callee->as.ident.name, "Err"))) {
+                for (int i = 0; i < expr->as.call.args.count; i++) {
+                    if (!analyze_expr(a, scope, expr->as.call.args.items[i]))
+                        return 0;
+                }
+                return 1;
+            }
             if (!analyze_expr(a, scope, expr->as.call.callee))
                 return 0;
             for (int i = 0; i < expr->as.call.args.count; i++) {
@@ -987,6 +1199,11 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
                 sema_error(&a, program->as.program.imports.items[i]->line,
                            program->as.program.imports.items[i]->col,
                            "import path cannot be empty");
+            } else if (!import_path_exists(&a, program->as.program.imports.items[i]->as.pkg.path)) {
+                sema_error(&a, program->as.program.imports.items[i]->line,
+                           program->as.program.imports.items[i]->col,
+                           "cannot resolve import '%s'",
+                           program->as.program.imports.items[i]->as.pkg.path);
             }
         }
     }

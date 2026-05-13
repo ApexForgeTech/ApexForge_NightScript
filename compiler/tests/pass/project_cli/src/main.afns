@@ -1,0 +1,8 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    puts("project");
+    return 0;
+}

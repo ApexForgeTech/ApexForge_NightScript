@@ -1,0 +1,40 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Error {
+    Bad;
+}
+
+fn maybe(v: i32) -> Option[i32] {
+    if v > 0 {
+        return Some(v);
+    }
+    return None;
+}
+
+fn work(ok: bool) -> Result[i32, Error] {
+    if ok {
+        return Ok(7);
+    }
+    return Err(Error.Bad);
+}
+
+fn main() -> i32 {
+    let a: Option[i32] = maybe(1);
+    let r: Result[i32, Error] = work(false);
+    let x: i32 = match a {
+        Some => 1,
+        None => 0,
+    };
+    let y: i32 = match r {
+        Ok => 1,
+        Err => 2,
+    };
+
+    if x == 1 && y == 2 {
+        puts("ok");
+    }
+
+    return 0;
+}

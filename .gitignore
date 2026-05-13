@@ -7,4 +7,5 @@ docs/
 *.generated.c
 *.o
 *.out
+compiler/build/
 .*

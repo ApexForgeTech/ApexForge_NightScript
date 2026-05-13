@@ -94,6 +94,19 @@ static Token *expect_path_token(Parser *p, const char *msg, int allow_self) {
     return expect(p, TOK_IDENT, msg);
 }
 
+static void append_type_token(char *buf, int *blen, int cap, Token *tok) {
+    int part = tok->len;
+
+    if (*blen >= cap - 1 || part <= 0)
+        return;
+
+    if (part > cap - 1 - *blen)
+        part = cap - 1 - *blen;
+
+    memcpy(buf + *blen, tok->start, (size_t)part);
+    *blen += part;
+}
+
 /* ── forward declarations ──────────────────────────────────────────────── */
 
 static Node *parse_type(Parser *p);
@@ -147,6 +160,21 @@ static Node *parse_type(Parser *p) {
         memcpy(buf + blen, id->start, (size_t)part);
         blen += part;
     }
+
+    if (check(p, TOK_LBRACKET)) {
+        int depth = 0;
+        do {
+            Token *tok = cur(p);
+            if (tok->kind == TOK_LBRACKET)
+                depth++;
+            else if (tok->kind == TOK_RBRACKET)
+                depth--;
+            append_type_token(buf, &blen, (int)sizeof(buf), tok);
+            p->pos++;
+            if (tok->kind == TOK_EOF)
+                break;
+        } while (depth > 0 && !check(p, TOK_EOF));
+    }
     buf[blen] = '\0';
 
     Node *n = node_new(p, NODE_TYPE_NAMED, t->line, t->col);
@@ -193,7 +221,7 @@ static Node *parse_primary(Parser *p) {
         return n;
     }
     if (match(p, TOK_CHAR)) {
-        Node *n = node_new(p, NODE_LIT_INT, t->line, t->col);
+        Node *n = node_new(p, NODE_LIT_CHAR, t->line, t->col);
         n->as.lit_int.value = prev(p)->int_val;
         return n;
     }
@@ -227,10 +255,14 @@ static Node *parse_primary(Parser *p) {
                 memcpy(pat, "_", 1); plen = 1;
             } else {
                 Token *en = expect(p, TOK_IDENT, "expected enum name or '_' in match arm");
-                expect(p, TOK_DOT, "expected '.' in match arm");
-                Token *vr = expect(p, TOK_IDENT, "expected variant name");
-                plen = snprintf(pat, sizeof(pat), "%.*s.%.*s",
-                                en->len, en->start, vr->len, vr->start);
+                if (match(p, TOK_DOT)) {
+                    Token *vr = expect(p, TOK_IDENT, "expected variant name");
+                    plen = snprintf(pat, sizeof(pat), "%.*s.%.*s",
+                                    en->len, en->start, vr->len, vr->start);
+                } else {
+                    plen = en->len < (int)sizeof(pat) - 1 ? en->len : (int)sizeof(pat) - 1;
+                    memcpy(pat, en->start, (size_t)plen);
+                }
             }
             expect(p, TOK_FAT_ARROW, "expected '=>' in match arm");
             Node *val = parse_expr(p);

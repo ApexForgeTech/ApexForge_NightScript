@@ -140,6 +140,10 @@ static void dump_node(FILE *out, Node *node, int indent) {
             print_indent(out, indent);
             fprintf(out, "IntLiteral(value=%lld)\n", node->as.lit_int.value);
             return;
+        case NODE_LIT_CHAR:
+            print_indent(out, indent);
+            fprintf(out, "CharLiteral(value=%lld)\n", node->as.lit_int.value);
+            return;
         case NODE_LIT_FLOAT:
             print_indent(out, indent);
             fprintf(out, "FloatLiteral(value=%g)\n", node->as.lit_float.value);

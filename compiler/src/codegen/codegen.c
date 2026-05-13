@@ -52,11 +52,18 @@ static const char *header_for_extern(const char *name);
 static void format_slice_type_name(Node *type, char *buf, size_t size);
 
 typedef struct SliceDef SliceDef;
+typedef struct OptionResultDef OptionResultDef;
 
 struct SliceDef {
     char     *name;
     Node     *type;
     SliceDef *next;
+};
+
+struct OptionResultDef {
+    char            *name;
+    int              is_result;
+    OptionResultDef *next;
 };
 
 static void append_text(char *buf, size_t size, const char *text) {
@@ -114,6 +121,146 @@ static char *dup_cstr(const char *text) {
 
     memcpy(copy, text, len + 1);
     return copy;
+}
+
+static int type_name_has_form(const char *name, const char *prefix) {
+    size_t prefix_len;
+    size_t len;
+
+    if (!name || !prefix)
+        return 0;
+
+    prefix_len = strlen(prefix);
+    len = strlen(name);
+    return len > prefix_len + 1 &&
+           !strncmp(name, prefix, prefix_len) &&
+           name[prefix_len] == '[' &&
+           name[len - 1] == ']';
+}
+
+static char *slice_range_dup(const char *start, const char *end) {
+    size_t len;
+    char *copy;
+
+    if (!start || !end || end < start)
+        return NULL;
+
+    len = (size_t)(end - start);
+    copy = malloc(len + 1);
+    if (!copy)
+        return NULL;
+
+    memcpy(copy, start, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static int split_top_level_comma(const char *text, char **left, char **right) {
+    int depth = 0;
+
+    *left = NULL;
+    *right = NULL;
+
+    for (const char *it = text; *it; it++) {
+        if (*it == '[')
+            depth++;
+        else if (*it == ']')
+            depth--;
+        else if (*it == ',' && depth == 0) {
+            *left = slice_range_dup(text, it);
+            *right = dup_cstr(it + 1);
+            return *left && *right;
+        }
+    }
+
+    return 0;
+}
+
+static void format_option_result_type_name(const char *name, char *buf, size_t size) {
+    size_t len;
+
+    if (!buf || size == 0)
+        return;
+
+    buf[0] = '\0';
+    append_text(buf, size, "NS_");
+    append_sanitized(buf, size, name ? name : "invalid");
+    len = strlen(buf);
+    while (len > 0 && buf[len - 1] == '_')
+        buf[--len] = '\0';
+}
+
+static int option_result_defs_contains(OptionResultDef *defs, const char *name) {
+    for (OptionResultDef *cur = defs; cur; cur = cur->next) {
+        if (!strcmp(cur->name, name))
+            return 1;
+    }
+    return 0;
+}
+
+static void collect_option_result_named_text(OptionResultDef **defs, const char *name) {
+    OptionResultDef *entry;
+    char *inner = NULL;
+    char *left = NULL;
+    char *right = NULL;
+
+    if (!name)
+        return;
+
+    if (type_name_has_form(name, "Option")) {
+        if (option_result_defs_contains(*defs, name))
+            goto recurse_option;
+
+        entry = calloc(1, sizeof(OptionResultDef));
+        if (!entry)
+            return;
+        entry->name = dup_cstr(name);
+        if (!entry->name) {
+            free(entry);
+            return;
+        }
+        entry->is_result = 0;
+        entry->next = *defs;
+        *defs = entry;
+
+recurse_option:
+        inner = slice_range_dup(name + 7, name + strlen(name) - 1);
+        if (inner) {
+            collect_option_result_named_text(defs, inner);
+            free(inner);
+        }
+        return;
+    }
+
+    if (!type_name_has_form(name, "Result"))
+        return;
+
+    if (!option_result_defs_contains(*defs, name)) {
+        entry = calloc(1, sizeof(OptionResultDef));
+        if (!entry)
+            return;
+        entry->name = dup_cstr(name);
+        if (!entry->name) {
+            free(entry);
+            return;
+        }
+        entry->is_result = 1;
+        entry->next = *defs;
+        *defs = entry;
+    }
+
+    inner = slice_range_dup(name + 7, name + strlen(name) - 1);
+    if (!inner)
+        return;
+
+    if (split_top_level_comma(inner, &left, &right)) {
+        collect_option_result_named_text(defs, left);
+        collect_option_result_named_text(defs, right);
+    }
+
+    free(inner);
+    free(left);
+    free(right);
 }
 
 static void append_type_mangle(Node *type, char *buf, size_t size) {
@@ -209,6 +356,24 @@ static void collect_slice_types_in_type(SliceDef **defs, Node *type) {
     entry->type = type;
     entry->next = *defs;
     *defs = entry;
+}
+
+static void collect_option_result_types_in_type(OptionResultDef **defs, Node *type) {
+    if (!type)
+        return;
+
+    if (type->kind == NODE_TYPE_NAMED) {
+        collect_option_result_named_text(defs, type->as.type_named.name);
+        return;
+    }
+
+    if (type->kind == NODE_TYPE_POINTER) {
+        collect_option_result_types_in_type(defs, type->as.type_ptr.inner);
+        return;
+    }
+
+    if (type->kind == NODE_TYPE_ARRAY)
+        collect_option_result_types_in_type(defs, type->as.type_array.elem);
 }
 
 static void collect_slice_types_in_node(SliceDef **defs, Node *node) {
@@ -335,9 +500,142 @@ static void collect_slice_types_in_node(SliceDef **defs, Node *node) {
     }
 }
 
+static void collect_option_result_types_in_node(OptionResultDef **defs, Node *node) {
+    if (!node)
+        return;
+
+    switch (node->kind) {
+        case NODE_TYPE_NAMED:
+        case NODE_TYPE_POINTER:
+        case NODE_TYPE_ARRAY:
+            collect_option_result_types_in_type(defs, node);
+            return;
+        case NODE_BINARY:
+            collect_option_result_types_in_node(defs, node->as.binary.left);
+            collect_option_result_types_in_node(defs, node->as.binary.right);
+            return;
+        case NODE_UNARY:
+            collect_option_result_types_in_node(defs, node->as.unary.operand);
+            return;
+        case NODE_CALL:
+            collect_option_result_types_in_node(defs, node->as.call.callee);
+            for (int i = 0; i < node->as.call.args.count; i++)
+                collect_option_result_types_in_node(defs, node->as.call.args.items[i]);
+            return;
+        case NODE_FIELD:
+            collect_option_result_types_in_node(defs, node->as.field.object);
+            return;
+        case NODE_CAST:
+            collect_option_result_types_in_node(defs, node->as.cast.expr);
+            collect_option_result_types_in_node(defs, node->as.cast.type);
+            return;
+        case NODE_ASSIGN:
+            collect_option_result_types_in_node(defs, node->as.assign.target);
+            collect_option_result_types_in_node(defs, node->as.assign.value);
+            return;
+        case NODE_INDEX:
+            collect_option_result_types_in_node(defs, node->as.index_expr.object);
+            collect_option_result_types_in_node(defs, node->as.index_expr.index);
+            return;
+        case NODE_DEFER:
+            collect_option_result_types_in_node(defs, node->as.defer_stmt.expr);
+            return;
+        case NODE_STRUCT_LIT:
+            for (int i = 0; i < node->as.struct_lit.count; i++)
+                collect_option_result_types_in_node(defs, node->as.struct_lit.field_values[i]);
+            return;
+        case NODE_MATCH:
+            collect_option_result_types_in_node(defs, node->as.match.subject);
+            for (int i = 0; i < node->as.match.count; i++)
+                collect_option_result_types_in_node(defs, node->as.match.values[i]);
+            return;
+        case NODE_GROUP:
+            collect_option_result_types_in_node(defs, node->as.group.expr);
+            return;
+        case NODE_BLOCK:
+            for (int i = 0; i < node->as.block.stmts.count; i++)
+                collect_option_result_types_in_node(defs, node->as.block.stmts.items[i]);
+            return;
+        case NODE_LET:
+            collect_option_result_types_in_node(defs, node->as.let.type);
+            collect_option_result_types_in_node(defs, node->as.let.value);
+            return;
+        case NODE_CONST:
+            collect_option_result_types_in_node(defs, node->as.konst.type);
+            collect_option_result_types_in_node(defs, node->as.konst.value);
+            return;
+        case NODE_RETURN:
+            collect_option_result_types_in_node(defs, node->as.ret.value);
+            return;
+        case NODE_IF:
+            collect_option_result_types_in_node(defs, node->as.if_stmt.cond);
+            collect_option_result_types_in_node(defs, node->as.if_stmt.then_block);
+            collect_option_result_types_in_node(defs, node->as.if_stmt.else_node);
+            return;
+        case NODE_WHILE:
+            collect_option_result_types_in_node(defs, node->as.while_stmt.cond);
+            collect_option_result_types_in_node(defs, node->as.while_stmt.body);
+            return;
+        case NODE_LOOP:
+        case NODE_UNSAFE:
+            collect_option_result_types_in_node(defs, node->as.loop_stmt.body);
+            return;
+        case NODE_FOR:
+            collect_option_result_types_in_node(defs, node->as.for_stmt.init);
+            collect_option_result_types_in_node(defs, node->as.for_stmt.cond);
+            collect_option_result_types_in_node(defs, node->as.for_stmt.post);
+            collect_option_result_types_in_node(defs, node->as.for_stmt.body);
+            return;
+        case NODE_EXPR_STMT:
+            collect_option_result_types_in_node(defs, node->as.expr_stmt.expr);
+            return;
+        case NODE_PROGRAM:
+            collect_option_result_types_in_node(defs, node->as.program.package);
+            for (int i = 0; i < node->as.program.imports.count; i++)
+                collect_option_result_types_in_node(defs, node->as.program.imports.items[i]);
+            for (int i = 0; i < node->as.program.decls.count; i++)
+                collect_option_result_types_in_node(defs, node->as.program.decls.items[i]);
+            return;
+        case NODE_FN_DECL:
+            for (int i = 0; i < node->as.fn.params.count; i++)
+                collect_option_result_types_in_node(defs, node->as.fn.params.items[i]);
+            collect_option_result_types_in_node(defs, node->as.fn.ret_type);
+            collect_option_result_types_in_node(defs, node->as.fn.body);
+            return;
+        case NODE_EXTERN_FN:
+            for (int i = 0; i < node->as.extern_fn.params.count; i++)
+                collect_option_result_types_in_node(defs, node->as.extern_fn.params.items[i]);
+            collect_option_result_types_in_node(defs, node->as.extern_fn.ret_type);
+            return;
+        case NODE_STRUCT_DECL:
+            for (int i = 0; i < node->as.struct_decl.fields.count; i++)
+                collect_option_result_types_in_node(defs, node->as.struct_decl.fields.items[i]);
+            return;
+        case NODE_UNION_DECL:
+            for (int i = 0; i < node->as.union_decl.fields.count; i++)
+                collect_option_result_types_in_node(defs, node->as.union_decl.fields.items[i]);
+            return;
+        case NODE_IMPL_DECL:
+            for (int i = 0; i < node->as.impl.methods.count; i++)
+                collect_option_result_types_in_node(defs, node->as.impl.methods.items[i]);
+            return;
+        default:
+            return;
+    }
+}
+
 static void free_slice_defs(SliceDef *defs) {
     while (defs) {
         SliceDef *next = defs->next;
+        free(defs->name);
+        free(defs);
+        defs = next;
+    }
+}
+
+static void free_option_result_defs(OptionResultDef *defs) {
+    while (defs) {
+        OptionResultDef *next = defs->next;
         free(defs->name);
         free(defs);
         defs = next;
@@ -368,7 +666,13 @@ static void emit_type_left(COut *o, Node *t) {
             else if (!strcmp(name, "never")) emit(o, "void");
             else if (!strcmp(name, "str"))   emit(o, "const char*");
             else if (!strcmp(name, "cstr"))  emit(o, "const char*");
-            else                             emit(o, "%s", name);
+            else if (type_name_has_form(name, "Option") || type_name_has_form(name, "Result")) {
+                char c_name[256];
+                format_option_result_type_name(name, c_name, sizeof(c_name));
+                emit(o, "%s", c_name);
+            } else {
+                emit(o, "%s", name);
+            }
             break;
         }
         case NODE_TYPE_POINTER:
@@ -437,6 +741,7 @@ typedef struct {
     Node       *program;
     CGScope    *scope;
     CGTempType *temps;
+    Node       *current_return_type;
     Node      **defers;     /* function-scoped defer list */
     int         defer_count;
     int         defer_cap;
@@ -702,9 +1007,36 @@ static int expr_is_addressable(Node *expr) {
 
 static Node *infer_expr_type(CGContext *cg, Node *expr);
 static void emit_expr(COut *o, CGContext *cg, Node *n);
+static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type);
 
 static void emit_match_condition(COut *o, CGContext *cg, Node *subject, const char *pattern) {
     const char *dot = strchr(pattern, '.');
+
+    if (!strcmp(pattern, "Some")) {
+        emit_expr(o, cg, subject);
+        emit(o, ".is_some");
+        return;
+    }
+
+    if (!strcmp(pattern, "None")) {
+        emit(o, "!(");
+        emit_expr(o, cg, subject);
+        emit(o, ".is_some)");
+        return;
+    }
+
+    if (!strcmp(pattern, "Ok")) {
+        emit_expr(o, cg, subject);
+        emit(o, ".is_ok");
+        return;
+    }
+
+    if (!strcmp(pattern, "Err")) {
+        emit(o, "!(");
+        emit_expr(o, cg, subject);
+        emit(o, ".is_ok)");
+        return;
+    }
 
     if (!dot) {
         emit(o, "0");
@@ -813,6 +1145,8 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
     switch (expr->kind) {
         case NODE_LIT_INT:
             return cg_temp_type_named(cg, "i32");
+        case NODE_LIT_CHAR:
+            return cg_temp_type_named(cg, "char");
         case NODE_LIT_FLOAT:
             return cg_temp_type_named(cg, "f64");
         case NODE_LIT_STRING:
@@ -950,9 +1284,71 @@ static MethodResolution resolve_method_call(CGContext *cg, Node *call) {
 }
 
 static void emit_expr(COut *o, CGContext *cg, Node *n) {
+    emit_expr_typed(o, cg, n, NULL);
+}
+
+static int emit_contextual_constructor(COut *o, CGContext *cg, Node *n, Node *expected_type) {
+    const char *type_name;
+    char c_name[256];
+
+    if (!n || !expected_type || expected_type->kind != NODE_TYPE_NAMED)
+        return 0;
+
+    type_name = expected_type->as.type_named.name;
+    if (!type_name)
+        return 0;
+
+    format_option_result_type_name(type_name, c_name, sizeof(c_name));
+
+    if (type_name_has_form(type_name, "Option")) {
+        if (n->kind == NODE_IDENT && !strcmp(n->as.ident.name, "None")) {
+            emit(o, "((%s){ .is_some = false })", c_name);
+            return 1;
+        }
+
+        if (n->kind == NODE_CALL && n->as.call.callee &&
+            n->as.call.callee->kind == NODE_IDENT &&
+            !strcmp(n->as.call.callee->as.ident.name, "Some") &&
+            n->as.call.args.count == 1) {
+            emit(o, "((%s){ .is_some = true, .value = ", c_name);
+            emit_expr(o, cg, n->as.call.args.items[0]);
+            emit(o, " })");
+            return 1;
+        }
+    }
+
+    if (type_name_has_form(type_name, "Result") &&
+        n->kind == NODE_CALL && n->as.call.callee &&
+        n->as.call.callee->kind == NODE_IDENT &&
+        n->as.call.args.count == 1) {
+        const char *ctor = n->as.call.callee->as.ident.name;
+        if (!strcmp(ctor, "Ok")) {
+            emit(o, "((%s){ .is_ok = true, .as.ok = ", c_name);
+            emit_expr(o, cg, n->as.call.args.items[0]);
+            emit(o, " })");
+            return 1;
+        }
+        if (!strcmp(ctor, "Err")) {
+            emit(o, "((%s){ .is_ok = false, .as.err = ", c_name);
+            emit_expr(o, cg, n->as.call.args.items[0]);
+            emit(o, " })");
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type) {
     if (!n) return;
+    if (emit_contextual_constructor(o, cg, n, expected_type))
+        return;
+
     switch (n->kind) {
         case NODE_LIT_INT:
+            emit(o, "%lld", n->as.lit_int.value);
+            break;
+        case NODE_LIT_CHAR:
             emit(o, "%lld", n->as.lit_int.value);
             break;
         case NODE_LIT_FLOAT:
@@ -1022,8 +1418,14 @@ static void emit_expr(COut *o, CGContext *cg, Node *n) {
                     emit_expr(o, cg, n->as.call.callee->as.field.object);
                 }
                 for (int i = 0; i < n->as.call.args.count; i++) {
+                    Node *param_type = NULL;
                     if (i || method.receiver != RECEIVER_NONE) emit(o, ", ");
-                    emit_expr(o, cg, n->as.call.args.items[i]);
+                    if (method.method) {
+                        int param_index = i + (method.receiver != RECEIVER_NONE ? 1 : 0);
+                        if (param_index < method.method->as.fn.params.count)
+                            param_type = method.method->as.fn.params.items[param_index]->as.let.type;
+                    }
+                    emit_expr_typed(o, cg, n->as.call.args.items[i], param_type);
                 }
                 emit(o, ")");
                 break;
@@ -1032,8 +1434,17 @@ static void emit_expr(COut *o, CGContext *cg, Node *n) {
             emit_expr(o, cg, n->as.call.callee);
             emit(o, "(");
             for (int i = 0; i < n->as.call.args.count; i++) {
+                Node *fn = NULL;
+                Node *param_type = NULL;
                 if (i) emit(o, ", ");
-                emit_expr(o, cg, n->as.call.args.items[i]);
+                if (n->as.call.callee->kind == NODE_IDENT)
+                    fn = find_free_function(cg, n->as.call.callee->as.ident.name);
+                if (fn) {
+                    NodeList *params = fn->kind == NODE_EXTERN_FN ? &fn->as.extern_fn.params : &fn->as.fn.params;
+                    if (i < params->count)
+                        param_type = params->items[i]->as.let.type;
+                }
+                emit_expr_typed(o, cg, n->as.call.args.items[i], param_type);
             }
             emit(o, ")");
             break;
@@ -1168,7 +1579,7 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             emit_typed_name(o, type ? type : cg_temp_type_named(cg, "void"), n->as.let.name);
             if (n->as.let.value) {
                 emit(o, " = ");
-                emit_expr(o, cg, n->as.let.value);
+                emit_expr_typed(o, cg, n->as.let.value, type);
             }
             emit(o, ";\n");
             cg_define(cg, n->as.let.name, type);
@@ -1180,7 +1591,7 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             emit(o, "const ");
             emit_typed_name(o, type ? type : cg_temp_type_named(cg, "void"), n->as.konst.name);
             emit(o, " = ");
-            emit_expr(o, cg, n->as.konst.value);
+            emit_expr_typed(o, cg, n->as.konst.value, type);
             emit(o, ";\n");
             cg_define(cg, n->as.konst.name, type);
             break;
@@ -1198,7 +1609,7 @@ static void emit_stmt(COut *o, CGContext *cg, Node *n) {
             emit_indent(o);
             if (n->as.ret.value) {
                 emit(o, "return ");
-                emit_expr(o, cg, n->as.ret.value);
+                emit_expr_typed(o, cg, n->as.ret.value, cg->current_return_type);
                 emit(o, ";\n");
             } else {
                 emit(o, "return;\n");
@@ -1451,6 +1862,7 @@ static void emit_standard_headers(COut *o, Node *prog) {
 /* pass 1: struct / enum / union definitions */
 static void emit_type_definitions(COut *o, Node *prog) {
     SliceDef *slice_defs = NULL;
+    OptionResultDef *option_result_defs = NULL;
     int emitted_forward = 0;
 
     for (int i = 0; i < prog->as.program.decls.count; i++) {
@@ -1516,6 +1928,7 @@ static void emit_type_definitions(COut *o, Node *prog) {
     }
 
     collect_slice_types_in_node(&slice_defs, prog);
+    collect_option_result_types_in_node(&option_result_defs, prog);
     for (SliceDef *slice = slice_defs; slice; slice = slice->next) {
         Node ptr_type;
 
@@ -1562,7 +1975,60 @@ static void emit_type_definitions(COut *o, Node *prog) {
         }
     }
 
+    for (OptionResultDef *def = option_result_defs; def; def = def->next) {
+        char c_name[256];
+        char *inner = NULL;
+        char *left = NULL;
+        char *right = NULL;
+        Node left_type = {0};
+        Node right_type = {0};
+
+        format_option_result_type_name(def->name, c_name, sizeof(c_name));
+        if (!def->is_result) {
+            inner = slice_range_dup(def->name + 7, def->name + strlen(def->name) - 1);
+            if (!inner)
+                continue;
+            left_type.kind = NODE_TYPE_NAMED;
+            left_type.as.type_named.name = inner;
+            emit(o, "typedef struct %s {\n", c_name);
+            emit(o, "    bool is_some;\n");
+            emit(o, "    ");
+            emit_typed_name(o, &left_type, "value");
+            emit(o, ";\n");
+            emit(o, "} %s;\n\n", c_name);
+            free(inner);
+            continue;
+        }
+
+        inner = slice_range_dup(def->name + 7, def->name + strlen(def->name) - 1);
+        if (!inner)
+            continue;
+        if (!split_top_level_comma(inner, &left, &right)) {
+            free(inner);
+            continue;
+        }
+        left_type.kind = NODE_TYPE_NAMED;
+        left_type.as.type_named.name = left;
+        right_type.kind = NODE_TYPE_NAMED;
+        right_type.as.type_named.name = right;
+        emit(o, "typedef struct %s {\n", c_name);
+        emit(o, "    bool is_ok;\n");
+        emit(o, "    union {\n");
+        emit(o, "        ");
+        emit_typed_name(o, &left_type, "ok");
+        emit(o, ";\n");
+        emit(o, "        ");
+        emit_typed_name(o, &right_type, "err");
+        emit(o, ";\n");
+        emit(o, "    } as;\n");
+        emit(o, "} %s;\n\n", c_name);
+        free(inner);
+        free(left);
+        free(right);
+    }
+
     free_slice_defs(slice_defs);
+    free_option_result_defs(option_result_defs);
 }
 
 /* pass 2: function prototypes */
@@ -1610,6 +2076,7 @@ static void emit_definitions(COut *o, Node *prog) {
             emit_fn_sig(o, cname, &d->as.fn.params, d->as.fn.ret_type);
             emit(o, "\n");
             cg.defer_count = 0; /* reset defers per function */
+            cg.current_return_type = d->as.fn.ret_type;
             cg_push_scope(&cg);
             for (int j = 0; j < d->as.fn.params.count; j++) {
                 Node *param = d->as.fn.params.items[j];
@@ -1628,6 +2095,7 @@ static void emit_definitions(COut *o, Node *prog) {
                 emit_fn_sig(o, cname, &m->as.fn.params, m->as.fn.ret_type);
                 emit(o, "\n");
                 cg.defer_count = 0; /* reset defers per function */
+                cg.current_return_type = m->as.fn.ret_type;
                 cg_push_scope(&cg);
                 for (int k = 0; k < m->as.fn.params.count; k++) {
                     Node *param = m->as.fn.params.items[k];

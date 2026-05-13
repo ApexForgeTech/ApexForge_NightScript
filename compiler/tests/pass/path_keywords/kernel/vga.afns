@@ -1,0 +1,5 @@
+package kernel.vga;
+
+fn noop_kernel() -> i32 {
+    return 0;
+}

@@ -1,0 +1,10 @@
+[package]
+name = "project_cli"
+
+[target]
+mode = "native"
+backend = "c"
+
+[build]
+entry = "src/main.afns"
+output = "project_cli_bin"
