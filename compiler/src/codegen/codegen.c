@@ -2092,7 +2092,14 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
 
             if (obj->kind == NODE_IDENT &&
                 enum_has_variant(cg, obj->as.ident.name, n->as.field.field)) {
-                emit(o, "%s_%s", obj->as.ident.name, n->as.field.field);
+                Node *ed = find_decl_named(cg->program, NODE_ENUM_DECL, obj->as.ident.name);
+                if (ed && enum_is_data_carrying(ed)) {
+                    /* no-payload variant of a tagged-union enum → emit struct literal */
+                    emit(o, "((%s){ .tag = %s_%s })",
+                         obj->as.ident.name, obj->as.ident.name, n->as.field.field);
+                } else {
+                    emit(o, "%s_%s", obj->as.ident.name, n->as.field.field);
+                }
                 break;
             }
 
@@ -2922,8 +2929,11 @@ static void collect_ui_elems(Node *elem, int *x_cur, int *y_cur, int *idx,
                               UIElemInfo *elems, int *count, int max) {
     if (*count >= max) return;
     int ek = elem->as.ui_element.elem_kind;
+    int is_container = (ek == UI_ELEM_WINDOW || ek == UI_ELEM_ROW ||
+                        ek == UI_ELEM_COLUMN || ek == UI_ELEM_PANEL ||
+                        ek == UI_ELEM_CANVAS || ek == UI_ELEM_MENU);
 
-    if (ek != UI_ELEM_WINDOW) {
+    if (!is_container) {
         int def_w = (ek == UI_ELEM_BUTTON) ? 160 :
                     (ek == UI_ELEM_LABEL)  ? 220 :
                     (ek == UI_ELEM_INPUT)  ? 200 : 160;
@@ -2955,9 +2965,26 @@ static void collect_ui_elems(Node *elem, int *x_cur, int *y_cur, int *idx,
     }
     (*idx)++;
 
-    for (int i = 0; i < elem->as.ui_element.children.count; i++)
-        collect_ui_elems(elem->as.ui_element.children.items[i],
-                         x_cur, y_cur, idx, elems, count, max);
+    if (elem->as.ui_element.children.count > 0) {
+        if (ek == UI_ELEM_ROW) {
+            /* horizontal flow: advance x_cur for each child, reset y_cur after */
+            int child_x = *x_cur;
+            int row_y   = *y_cur;
+            int row_max_h = 0;
+            for (int i = 0; i < elem->as.ui_element.children.count; i++) {
+                int cy = row_y;
+                collect_ui_elems(elem->as.ui_element.children.items[i],
+                                 &child_x, &cy, idx, elems, count, max);
+                if ((cy - row_y) > row_max_h) row_max_h = cy - row_y;
+            }
+            *y_cur = row_y + row_max_h;
+        } else {
+            /* vertical flow (default: window, column, panel, and leaf elements) */
+            for (int i = 0; i < elem->as.ui_element.children.count; i++)
+                collect_ui_elems(elem->as.ui_element.children.items[i],
+                                 x_cur, y_cur, idx, elems, count, max);
+        }
+    }
 }
 
 static void emit_ui_app(COut *o, Node *prog) {

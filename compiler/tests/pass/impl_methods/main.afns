@@ -1,0 +1,66 @@
+package impltest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+struct Vec2 {
+    x: i32;
+    y: i32;
+}
+
+impl Vec2 {
+    fn new(x: i32, y: i32) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+
+    fn dot(self: *Vec2, other: *Vec2) -> i32 {
+        return self.x * other.x + self.y * other.y;
+    }
+
+    fn len_sq(self: *Vec2) -> i32 {
+        return self.x * self.x + self.y * self.y;
+    }
+
+    fn scale(self: *Vec2, factor: i32) -> void {
+        self.x = self.x * factor;
+        self.y = self.y * factor;
+    }
+}
+
+struct Counter {
+    value: i32;
+}
+
+impl Counter {
+    fn inc(self: *Counter) -> void {
+        self.value = self.value + 1;
+    }
+
+    fn get(self: *Counter) -> i32 {
+        return self.value;
+    }
+
+    fn reset(self: *Counter) -> void {
+        self.value = 0;
+    }
+}
+
+fn main() -> i32 {
+    let v1: Vec2 = Vec2.new(3, 4);
+    let v2: Vec2 = Vec2.new(1, 2);
+
+    if Vec2.len_sq(&v1) == 25 { puts("lensq ok"); }
+    if Vec2.dot(&v1, &v2) == 11 { puts("dot ok"); }
+
+    Vec2.scale(&v1, 2);
+    if v1.x == 6 && v1.y == 8 { puts("scale ok"); }
+
+    let c: Counter = Counter { value: 0 };
+    Counter.inc(&c);
+    Counter.inc(&c);
+    Counter.inc(&c);
+    if Counter.get(&c) == 3 { puts("counter ok"); }
+    Counter.reset(&c);
+    if Counter.get(&c) == 0 { puts("reset ok"); }
+
+    return 0;
+}

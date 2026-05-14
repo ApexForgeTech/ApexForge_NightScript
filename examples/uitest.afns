@@ -1,0 +1,16 @@
+package myapp;
+
+ui app MyApp {
+    window("Salam") {
+        width: 800;
+        height: 600;
+
+        label("Xos geldin") {}
+
+        button("Click me") {
+            onClick {
+                let x: i32 = 1;
+            }
+        }
+    }
+}

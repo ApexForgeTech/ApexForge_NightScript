@@ -1,0 +1,36 @@
+package nestedif;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn classify(n: i32) -> i32 {
+    if n < 0 {
+        return -1;
+    } else if n == 0 {
+        return 0;
+    } else if n < 10 {
+        return 1;
+    } else if n < 100 {
+        return 2;
+    } else {
+        return 3;
+    }
+}
+
+fn main() -> i32 {
+    if classify(-5)  == -1 { puts("neg ok");  }
+    if classify(0)   ==  0 { puts("zero ok"); }
+    if classify(7)   ==  1 { puts("small ok");}
+    if classify(42)  ==  2 { puts("mid ok");  }
+    if classify(999) ==  3 { puts("big ok");  }
+
+    /* nested blocks */
+    let a: i32 = 3;
+    let b: i32 = 7;
+    if a < b {
+        if a + b == 10 {
+            puts("nest ok");
+        }
+    }
+
+    return 0;
+}

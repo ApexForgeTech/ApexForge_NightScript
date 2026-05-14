@@ -1,0 +1,32 @@
+package ptrtest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn increment(p: *i32) -> void {
+    *p = *p + 1;
+}
+
+fn swap(a: *i32, b: *i32) -> void {
+    let tmp: i32 = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+fn main() -> i32 {
+    let x: i32 = 10;
+    increment(&x);
+    if x == 11 { puts("inc ok"); }
+
+    let a: i32 = 3;
+    let b: i32 = 7;
+    swap(&a, &b);
+    if a == 7 && b == 3 { puts("swap ok"); }
+
+    /* double indirection */
+    let v: i32 = 42;
+    let p: *i32 = &v;
+    let deref: i32 = *p;
+    if deref == 42 { puts("deref ok"); }
+
+    return 0;
+}

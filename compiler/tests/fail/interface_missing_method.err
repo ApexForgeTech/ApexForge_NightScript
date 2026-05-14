@@ -1,0 +1,1 @@
+does not satisfy interface 'Greet': missing method 'goodbye'

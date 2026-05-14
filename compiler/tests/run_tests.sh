@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..49\n'
+printf '1..74\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -334,3 +334,184 @@ printf 'ok 48 - private function import diagnostic\n'
 
 run_fail_case "$FAIL_DIR/private_type_import/main.afns" "$FAIL_DIR/private_type_import.err" "private type import diagnostic"
 printf 'ok 49 - private type import diagnostic\n'
+
+# ── v0.1: basic language features ──────────────────────────────────────────
+
+run_capture "arithmetic check" "$NIGHT" check "$PASS_DIR/arithmetic/main.afns"
+run_capture "arithmetic run"   "$NIGHT" run   "$PASS_DIR/arithmetic/main.afns" -o "$TMP_DIR/arithmetic_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/arithmetic/main.out"; then
+    fail "arithmetic output mismatch"
+fi
+printf 'ok 50 - arithmetic operators and compound assign\n'
+
+run_capture "recursion check" "$NIGHT" check "$PASS_DIR/recursion/main.afns"
+run_capture "recursion run"   "$NIGHT" run   "$PASS_DIR/recursion/main.afns" -o "$TMP_DIR/recursion_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/recursion/main.out"; then
+    fail "recursion output mismatch"
+fi
+printf 'ok 51 - recursive functions (fib, factorial)\n'
+
+run_capture "bool_logic check" "$NIGHT" check "$PASS_DIR/bool_logic/main.afns"
+run_capture "bool_logic run"   "$NIGHT" run   "$PASS_DIR/bool_logic/main.afns" -o "$TMP_DIR/bool_logic_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/bool_logic/main.out"; then
+    fail "bool_logic output mismatch"
+fi
+printf 'ok 52 - boolean operators and comparisons\n'
+
+run_capture "bitwise check" "$NIGHT" check "$PASS_DIR/bitwise/main.afns"
+run_capture "bitwise run"   "$NIGHT" run   "$PASS_DIR/bitwise/main.afns" -o "$TMP_DIR/bitwise_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/bitwise/main.out"; then
+    fail "bitwise output mismatch"
+fi
+printf 'ok 53 - bitwise operators (&, |, ^, ~, <<, >>)\n'
+
+run_capture "while_basic check" "$NIGHT" check "$PASS_DIR/while_basic/main.afns"
+run_capture "while_basic run"   "$NIGHT" run   "$PASS_DIR/while_basic/main.afns" -o "$TMP_DIR/while_basic_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/while_basic/main.out"; then
+    fail "while_basic output mismatch"
+fi
+printf 'ok 54 - while loop with break and continue\n'
+
+run_capture "nested_if check" "$NIGHT" check "$PASS_DIR/nested_if/main.afns"
+run_capture "nested_if run"   "$NIGHT" run   "$PASS_DIR/nested_if/main.afns" -o "$TMP_DIR/nested_if_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/nested_if/main.out"; then
+    fail "nested_if output mismatch"
+fi
+printf 'ok 55 - nested if/else-if chains\n'
+
+# ── v0.2: structs, enums, impl, interfaces, Option/Result ──────────────────
+
+run_capture "impl_methods check" "$NIGHT" check "$PASS_DIR/impl_methods/main.afns"
+run_capture "impl_methods run"   "$NIGHT" run   "$PASS_DIR/impl_methods/main.afns" -o "$TMP_DIR/impl_methods_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/impl_methods/main.out"; then
+    fail "impl_methods output mismatch"
+fi
+printf 'ok 56 - struct methods (impl, self receiver)\n'
+
+run_capture "interface_satisfy check" "$NIGHT" check "$PASS_DIR/interface_satisfy/main.afns"
+run_capture "interface_satisfy run"   "$NIGHT" run   "$PASS_DIR/interface_satisfy/main.afns" -o "$TMP_DIR/iface_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/interface_satisfy/main.out"; then
+    fail "interface_satisfy output mismatch"
+fi
+printf 'ok 57 - interface implementation satisfaction\n'
+
+run_capture "enum_match_full check" "$NIGHT" check "$PASS_DIR/enum_match_full/main.afns"
+run_capture "enum_match_full run"   "$NIGHT" run   "$PASS_DIR/enum_match_full/main.afns" -o "$TMP_DIR/enum_match_full_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/enum_match_full/main.out"; then
+    fail "enum_match_full output mismatch"
+fi
+printf 'ok 58 - enum variants with and without payload\n'
+
+run_capture "option_chain check" "$NIGHT" check "$PASS_DIR/option_chain/main.afns"
+run_capture "option_chain run"   "$NIGHT" run   "$PASS_DIR/option_chain/main.afns" -o "$TMP_DIR/option_chain_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/option_chain/main.out"; then
+    fail "option_chain output mismatch"
+fi
+printf 'ok 59 - Option[T] with try propagation\n'
+
+# ── v0.3: pointers, unsafe, defer, type cast ───────────────────────────────
+
+run_capture "ptr_deref check" "$NIGHT" check "$PASS_DIR/ptr_deref/main.afns"
+run_capture "ptr_deref run"   "$NIGHT" run   "$PASS_DIR/ptr_deref/main.afns" -o "$TMP_DIR/ptr_deref_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/ptr_deref/main.out"; then
+    fail "ptr_deref output mismatch"
+fi
+printf 'ok 60 - pointer dereference and mutation\n'
+
+run_capture "unsafe_block check" "$NIGHT" check "$PASS_DIR/unsafe_block/main.afns"
+run_capture "unsafe_block run"   "$NIGHT" run   "$PASS_DIR/unsafe_block/main.afns" -o "$TMP_DIR/unsafe_block_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/unsafe_block/main.out"; then
+    fail "unsafe_block output mismatch"
+fi
+printf 'ok 61 - unsafe blocks and raw pointer operations\n'
+
+run_capture "defer_order check" "$NIGHT" check "$PASS_DIR/defer_order/main.afns"
+run_capture "defer_order run"   "$NIGHT" run   "$PASS_DIR/defer_order/main.afns" -o "$TMP_DIR/defer_order_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/defer_order/main.out"; then
+    fail "defer_order output mismatch"
+fi
+printf 'ok 62 - defer LIFO ordering and early-return\n'
+
+run_capture "type_cast check" "$NIGHT" check "$PASS_DIR/type_cast/main.afns"
+run_capture "type_cast run"   "$NIGHT" run   "$PASS_DIR/type_cast/main.afns" -o "$TMP_DIR/type_cast_bin"
+if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/type_cast/main.out"; then
+    fail "type_cast output mismatch"
+fi
+printf 'ok 63 - numeric type casts (as)\n'
+
+# ── v0.4: UI codegen ────────────────────────────────────────────────────────
+
+run_capture "ui codegen check"  "$NIGHT" check   "$PASS_DIR/ui_codegen/main.afns"
+run_capture "ui codegen output" "$NIGHT" codegen "$PASS_DIR/ui_codegen/main.afns"
+assert_contains "$TMP_DIR/stdout" "#include <SDL2/SDL.h>"   "ui SDL2 include"
+assert_contains "$TMP_DIR/stdout" "NSUIElem"                "ui element table"
+assert_contains "$TMP_DIR/stdout" "ns_handler_"             "ui handler function"
+assert_contains "$TMP_DIR/stdout" "int main(void)"          "ui main entry"
+printf 'ok 64 - UI app codegen (SDL2 backend)\n'
+
+# ── fail diagnostics ────────────────────────────────────────────────────────
+
+run_fail_case "$FAIL_DIR/interface_missing_method/main.afns" \
+              "$FAIL_DIR/interface_missing_method.err" \
+              "interface missing method diagnostic"
+printf 'ok 65 - interface missing method diagnostic\n'
+
+run_fail_case "$FAIL_DIR/dup_function/main.afns" \
+              "$FAIL_DIR/dup_function.err" \
+              "duplicate function diagnostic"
+printf 'ok 66 - duplicate function diagnostic\n'
+
+run_fail_case "$FAIL_DIR/dup_struct_field/main.afns" \
+              "$FAIL_DIR/dup_struct_field.err" \
+              "duplicate struct field diagnostic"
+printf 'ok 67 - duplicate struct field diagnostic\n'
+
+run_fail_case "$FAIL_DIR/type_mismatch/main.afns" \
+              "$FAIL_DIR/type_mismatch.err" \
+              "argument type mismatch diagnostic"
+printf 'ok 68 - argument type mismatch diagnostic\n'
+
+run_fail_case "$FAIL_DIR/return_wrong_type/main.afns" \
+              "$FAIL_DIR/return_wrong_type.err" \
+              "return type mismatch diagnostic"
+printf 'ok 69 - return type mismatch diagnostic\n'
+
+# ── regression: codegen correctness ─────────────────────────────────────────
+
+run_capture "enum no-payload in tagged union codegen" \
+    "$NIGHT" codegen "$PASS_DIR/enum_match_full/main.afns"
+assert_contains "$TMP_DIR/stdout" ".tag = Message_Quit" \
+    "no-payload variant emitted as struct literal"
+printf 'ok 70 - no-payload enum variant in tagged union emits struct literal\n'
+
+# ── cross-cutting: stdlib modules ────────────────────────────────────────────
+
+STDLIB_DIR="$(dirname "$COMPILER_DIR")/stdlib"
+
+if [ -f "$STDLIB_DIR/core/math.afns" ]; then
+    run_capture "stdlib core.math check" "$NIGHT" check "$STDLIB_DIR/core/math.afns"
+    printf 'ok 71 - stdlib core.math parses and type-checks\n'
+else
+    printf 'ok 71 - stdlib core.math (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/core/mem.afns" ]; then
+    run_capture "stdlib core.mem check" "$NIGHT" check "$STDLIB_DIR/core/mem.afns"
+    printf 'ok 72 - stdlib core.mem parses and type-checks\n'
+else
+    printf 'ok 72 - stdlib core.mem (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/alloc/buf.afns" ]; then
+    run_capture "stdlib alloc.buf check" "$NIGHT" check "$STDLIB_DIR/alloc/buf.afns"
+    printf 'ok 73 - stdlib alloc.buf parses and type-checks\n'
+else
+    printf 'ok 73 - stdlib alloc.buf (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/io/print.afns" ]; then
+    run_capture "stdlib io.print check" "$NIGHT" check "$STDLIB_DIR/io/print.afns"
+    printf 'ok 74 - stdlib io.print parses and type-checks\n'
+else
+    printf 'ok 74 - stdlib io.print (skipped: not found)\n'
+fi

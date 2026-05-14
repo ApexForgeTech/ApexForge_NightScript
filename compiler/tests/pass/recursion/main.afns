@@ -1,0 +1,30 @@
+package recursion;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+/* Classic Fibonacci — tests recursion and stack discipline */
+fn fib(n: i32) -> i32 {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+/* Factorial */
+fn fact(n: i32) -> i32 {
+    if n == 0 {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+fn main() -> i32 {
+    if fib(0)  == 0  { puts("fib0 ok");  }
+    if fib(1)  == 1  { puts("fib1 ok");  }
+    if fib(10) == 55 { puts("fib10 ok"); }
+
+    if fact(0) == 1   { puts("fact0 ok"); }
+    if fact(5) == 120 { puts("fact5 ok"); }
+
+    return 0;
+}

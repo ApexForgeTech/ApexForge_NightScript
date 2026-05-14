@@ -52,6 +52,9 @@ typedef struct {
     MethodDecl    *methods;
     int            method_count;
     int            method_cap;
+    NamedDecl     *interfaces;
+    int            interface_count;
+    int            interface_cap;
     const char   **global_names;
     int            global_name_count;
     int            global_name_cap;
@@ -578,6 +581,45 @@ static int register_union_decl(Analyzer *a, Node *decl) {
                            decl->as.union_decl.name, decl);
 }
 
+static int register_interface_decl(Analyzer *a, Node *decl) {
+    if (!register_global_name(a, decl->as.interface_decl.name, decl))
+        return 0;
+
+    if (find_named_decl(a->interfaces, a->interface_count, decl->as.interface_decl.name)) {
+        sema_error(a, decl->line, decl->col,
+                   "duplicate interface '%s'", decl->as.interface_decl.name);
+        return 0;
+    }
+
+    return push_named_decl(&a->interfaces, &a->interface_count, &a->interface_cap,
+                           decl->as.interface_decl.name, decl);
+}
+
+static int check_impl_satisfies_interface(Analyzer *a, Node *impl_decl, Node *iface_decl) {
+    for (int i = 0; i < iface_decl->as.interface_decl.methods.count; i++) {
+        Node *required = iface_decl->as.interface_decl.methods.items[i];
+        const char *req_name = required->as.fn.name;
+        int found = 0;
+
+        for (int j = 0; j < impl_decl->as.impl.methods.count; j++) {
+            if (!strcmp(impl_decl->as.impl.methods.items[j]->as.fn.name, req_name)) {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            sema_error(a, impl_decl->line, impl_decl->col,
+                       "impl '%s' does not satisfy interface '%s': missing method '%s'",
+                       impl_decl->as.impl.target,
+                       impl_decl->as.impl.interface_name,
+                       req_name);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int register_impl_decl(Analyzer *a, Node *decl) {
     if (!find_named_decl(a->structs, a->struct_count, decl->as.impl.target)) {
         sema_error(a, decl->line, decl->col,
@@ -624,6 +666,18 @@ static int register_impl_decl(Analyzer *a, Node *decl) {
             sema_error(a, method->line, method->col, "out of memory");
             return 0;
         }
+    }
+
+    if (decl->as.impl.interface_name) {
+        NamedDecl *iface_entry = find_named_decl(a->interfaces, a->interface_count,
+                                                  decl->as.impl.interface_name);
+        if (!iface_entry) {
+            sema_error(a, decl->line, decl->col,
+                       "unknown interface '%s'", decl->as.impl.interface_name);
+            return 0;
+        }
+        if (!check_impl_satisfies_interface(a, decl, iface_entry->node))
+            return 0;
     }
 
     return 1;
@@ -697,7 +751,8 @@ static int analyze_match_pattern(Analyzer *a, const char *pattern, int line, int
         return 0;
     }
 
-    strcpy(variant_name, dot + 1);
+    strncpy(variant_name, dot + 1, sizeof(variant_name) - 1);
+    variant_name[sizeof(variant_name) - 1] = '\0';
 
     if (!find_named_decl(a->enums, a->enum_count, enum_name)) {
         sema_error(a, line, col, "unknown enum '%s' in match pattern", enum_name);
@@ -1177,6 +1232,14 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
 
     for (int i = 0; i < program->as.program.decls.count && !a.had_error; i++) {
         Node *decl = program->as.program.decls.items[i];
+        if (decl->kind == NODE_INTERFACE_DECL) {
+            if (!register_interface_decl(&a, decl))
+                a.had_error = 1;
+        }
+    }
+
+    for (int i = 0; i < program->as.program.decls.count && !a.had_error; i++) {
+        Node *decl = program->as.program.decls.items[i];
 
         switch (decl->kind) {
             case NODE_FN_DECL:
@@ -1236,6 +1299,7 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
         free(a.enums);
         free(a.unions);
         free(a.methods);
+        free(a.interfaces);
         free(a.global_names);
         return 0;
     }
@@ -1265,6 +1329,7 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
         free(a.enums);
         free(a.unions);
         free(a.methods);
+        free(a.interfaces);
         free(a.global_names);
         fprintf(stderr, "%s:0:0: error: out of memory\n", source_name);
         return 0;
@@ -1276,6 +1341,7 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
     free(a.enums);
     free(a.unions);
     free(a.methods);
+    free(a.interfaces);
     free(a.global_names);
     return 1;
 }

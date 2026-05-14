@@ -1,0 +1,21 @@
+package myapp;
+
+ui app MyApp {
+    window("Hello NightScript") {
+        width:  800;
+        height: 600;
+
+        label("Welcome to NightScript!") {}
+
+        button("Click me") {
+            onClick {
+                let x: i32 = 1;
+            }
+        }
+
+        row {
+            button("A") {}
+            button("B") {}
+        }
+    }
+}

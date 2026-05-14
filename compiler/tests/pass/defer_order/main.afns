@@ -1,0 +1,26 @@
+package defertest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+/* Defers run in reverse order (LIFO) at function exit */
+fn lifo() -> i32 {
+    defer puts("third");
+    defer puts("second");
+    defer puts("first");
+    return 0;
+}
+
+fn with_early_return(n: i32) -> i32 {
+    defer puts("cleanup");
+    if n < 0 {
+        return -1;
+    }
+    return n * 2;
+}
+
+fn main() -> i32 {
+    lifo();
+    with_early_return(5);
+    with_early_return(-1);
+    return 0;
+}

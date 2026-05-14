@@ -1,0 +1,50 @@
+package enumtest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Direction {
+    North;
+    South;
+    East;
+    West;
+}
+
+enum Message {
+    Move(dx: i32, dy: i32);
+    Print(code: i32);
+    Quit;
+}
+
+fn dir_name(d: Direction) -> i32 {
+    return match d {
+        Direction.North => 1,
+        Direction.South => 2,
+        Direction.East  => 3,
+        Direction.West  => 4,
+    };
+}
+
+fn process(m: Message) -> i32 {
+    return match m {
+        Message.Move  => 10,
+        Message.Print => 20,
+        Message.Quit  => 30,
+    };
+}
+
+fn main() -> i32 {
+    if dir_name(Direction.North) == 1 { puts("north ok"); }
+    if dir_name(Direction.South) == 2 { puts("south ok"); }
+    if dir_name(Direction.East)  == 3 { puts("east ok");  }
+    if dir_name(Direction.West)  == 4 { puts("west ok");  }
+
+    let mv: Message = Message.Move(3, 4);
+    let pr: Message = Message.Print(42);
+    let qt: Message = Message.Quit;
+
+    if process(mv) == 10 { puts("move ok");  }
+    if process(pr) == 20 { puts("print ok"); }
+    if process(qt) == 30 { puts("quit ok");  }
+
+    return 0;
+}

@@ -1,0 +1,40 @@
+package whiletest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    /* sum 1..10 */
+    let sum: i32 = 0;
+    let i: i32 = 1;
+    while i <= 10 {
+        sum += i;
+        i += 1;
+    }
+    if sum == 55 { puts("sum ok"); }
+
+    /* early break */
+    let found: i32 = 0;
+    let j: i32 = 0;
+    while j < 100 {
+        if j == 7 {
+            found = j;
+            break;
+        }
+        j += 1;
+    }
+    if found == 7 { puts("break ok"); }
+
+    /* continue */
+    let evens: i32 = 0;
+    let k: i32 = 0;
+    while k < 10 {
+        k += 1;
+        if k % 2 != 0 {
+            continue;
+        }
+        evens += 1;
+    }
+    if evens == 5 { puts("continue ok"); }
+
+    return 0;
+}

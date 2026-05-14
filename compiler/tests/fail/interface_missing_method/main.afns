@@ -1,0 +1,17 @@
+package ifacemissing;
+
+interface Greet {
+    fn hello(self: *Self) -> void;
+    fn goodbye(self: *Self) -> void;
+}
+
+struct Bot {}
+
+/* impl declares only hello — missing goodbye */
+impl Bot : Greet {
+    fn hello(self: *Bot) -> void {}
+}
+
+fn main() -> i32 {
+    return 0;
+}

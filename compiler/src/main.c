@@ -42,6 +42,7 @@ typedef struct {
     char *target_backend;
     char *entry;
     char *output;
+    char *optimization;  /* "debug" | "release" — maps to -g | -O2 */
     DepEntry *deps;
     int dep_count;
     int dep_cap;
@@ -321,6 +322,7 @@ static void project_config_free(ProjectConfig *cfg) {
     free(cfg->target_backend);
     free(cfg->entry);
     free(cfg->output);
+    free(cfg->optimization);
     for (int i = 0; i < cfg->dep_count; i++) {
         free(cfg->deps[i].name);
         free(cfg->deps[i].version);
@@ -489,6 +491,8 @@ static int parse_project_config(const char *project_dir, ProjectConfig *cfg) {
                 fprintf(stderr, "error: invalid build.output in '%s'\n", toml_path);
                 goto cleanup;
             }
+        } else if (!strcmp(section, "build") && !strcmp(key, "optimization")) {
+            parse_toml_string(value, &cfg->optimization);
         }
     }
 
@@ -527,7 +531,8 @@ static char *resolve_project_output(const ProjectConfig *cfg) {
     return path_join(cfg->root_dir, cfg->output);
 }
 
-static int resolve_input_path(Command cmd, const char *input, char **resolved_path, char **resolved_output) {
+static int resolve_input_path(Command cmd, const char *input, char **resolved_path,
+                              char **resolved_output, char **out_opt_flags) {
     ProjectConfig cfg;
     const char *project_dir = input;
     char *entry = NULL;
@@ -535,6 +540,7 @@ static int resolve_input_path(Command cmd, const char *input, char **resolved_pa
 
     *resolved_path = NULL;
     *resolved_output = NULL;
+    if (out_opt_flags) *out_opt_flags = NULL;
 
     if (input && !path_is_dir(input)) {
         *resolved_path = dup_string(input);
@@ -566,6 +572,13 @@ static int resolve_input_path(Command cmd, const char *input, char **resolved_pa
             project_config_free(&cfg);
             return 0;
         }
+    }
+
+    if (out_opt_flags && cfg.optimization) {
+        if (!strcmp(cfg.optimization, "release"))
+            *out_opt_flags = dup_string("-O2");
+        else
+            *out_opt_flags = dup_string("-g");
     }
 
     *resolved_path = entry;
@@ -1301,17 +1314,29 @@ static int program_has_ui(CompileState *state) {
     return 0;
 }
 
-static int build_binary(const char *src_path, const char *binary_path) {
+static int build_binary(const char *src_path, const char *binary_path,
+                        const char *opt_flags) {
     CompileState state;
     char *c_path = NULL;
+    char *extra_flags = NULL;
     int ok = 0;
-    const char *extra_flags = "";
 
     if (!compile_source(src_path, &state))
         return 1;
 
-    if (program_has_ui(&state))
-        extra_flags = "-lSDL2";
+    /* build extra flags: opt_flags + SDL2 if UI app */
+    {
+        const char *sdl = program_has_ui(&state) ? " -lSDL2" : "";
+        const char *opt = opt_flags ? opt_flags : "-g";
+        size_t len = strlen(opt) + strlen(sdl) + 1;
+        extra_flags = malloc(len);
+        if (!extra_flags) {
+            fprintf(stderr, "error: out of memory\n");
+            compile_state_free(&state);
+            return 1;
+        }
+        snprintf(extra_flags, len, "%s%s", opt, sdl);
+    }
 
     c_path = replace_extension(binary_path, ".generated.c");
     if (!c_path) {
@@ -1328,10 +1353,33 @@ static int build_binary(const char *src_path, const char *binary_path) {
     if (!invoke_cc(c_path, binary_path, extra_flags))
         goto cleanup;
 
+    /* write night.lock: one line per package in the program (no deps = empty lock) */
+    {
+        char *lock_path = NULL;
+        char *src_dir = path_dirname(src_path);
+        if (src_dir) {
+            char *bin_dir = path_dirname(binary_path);
+            const char *lock_dir = bin_dir ? bin_dir : src_dir;
+            lock_path = path_join(lock_dir, "night.lock");
+            free(bin_dir);
+        }
+        if (lock_path) {
+            FILE *lf = fopen(lock_path, "w");
+            if (lf) {
+                fprintf(lf, "# NightScript lock file — do not edit manually\n");
+                fprintf(lf, "version = 1\n");
+                fclose(lf);
+            }
+            free(lock_path);
+        }
+        free(src_dir);
+    }
+
     ok = 1;
 
 cleanup:
     free(c_path);
+    free(extra_flags);
     compile_state_free(&state);
     return ok ? 0 : 1;
 }
@@ -1420,7 +1468,7 @@ int main(int argc, char **argv) {
     }
 
     if (cmd == CMD_FMT) {
-        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
+        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output, NULL))
             return 1;
         free(resolved_output);
         resolved_output = NULL;
@@ -1433,7 +1481,7 @@ int main(int argc, char **argv) {
     }
 
     if (cmd == CMD_CLEAN) {
-        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
+        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output, NULL))
             return 1;
         {
             int rc = clean_outputs(resolved_path, resolved_output) ? 0 : 1;
@@ -1443,133 +1491,141 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output))
-        return 1;
-    path = resolved_path;
-    if (!output_path && resolved_output)
-        output_path = resolved_output;
-
     /* suppress unused warning — target_arch may be used for cross-compilation later */
     (void)target_arch;
 
-    if (cmd == CMD_TEST) {
-        /* Discover and run tests: look for tests/ directory inside the project */
-        const char *test_dir_rel = "tests";
-        char *test_dir = NULL;
-        char **test_files = NULL;
-        int test_count = 0;
-        int passed = 0, failed = 0;
+    {
+        char *opt_flags = NULL;
+        if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output, &opt_flags))
+            return 1;
+        path = resolved_path;
+        if (!output_path && resolved_output)
+            output_path = resolved_output;
 
-        if (path) {
-            test_dir = path_join(path, test_dir_rel);
-        } else {
-            test_dir = dup_string(test_dir_rel);
-        }
+        if (cmd == CMD_TEST) {
+            const char *test_dir_rel = "tests";
+            char *test_dir = NULL;
+            char **test_files = NULL;
+            int test_count = 0;
+            int passed = 0, failed = 0;
 
-        if (test_dir && path_is_dir(test_dir)) {
-            collect_afns_files_in_dir(test_dir, &test_files, &test_count);
-            for (int i = 0; i < test_count; i++) {
-                CompileState ts;
-                if (compile_source(test_files[i], &ts)) {
-                    printf("PASS: %s\n", test_files[i]);
-                    passed++;
-                } else {
-                    printf("FAIL: %s\n", test_files[i]);
-                    failed++;
+            if (path) {
+                test_dir = path_join(path, test_dir_rel);
+            } else {
+                test_dir = dup_string(test_dir_rel);
+            }
+
+            if (test_dir && path_is_dir(test_dir)) {
+                collect_afns_files_in_dir(test_dir, &test_files, &test_count);
+                for (int i = 0; i < test_count; i++) {
+                    CompileState ts;
+                    if (compile_source(test_files[i], &ts)) {
+                        printf("PASS: %s\n", test_files[i]);
+                        passed++;
+                    } else {
+                        printf("FAIL: %s\n", test_files[i]);
+                        failed++;
+                    }
+                    compile_state_free(&ts);
+                    free(test_files[i]);
                 }
-                compile_state_free(&ts);
-                free(test_files[i]);
+                free(test_files);
+            } else {
+                fprintf(stderr, "note: no tests/ directory found\n");
             }
-            free(test_files);
-        } else {
-            fprintf(stderr, "note: no tests/ directory found\n");
-        }
-        free(test_dir);
-        free(resolved_path);
-        free(resolved_output);
-        printf("\n%d passed, %d failed\n", passed, failed);
-        return failed > 0 ? 1 : 0;
-    }
-
-    if (cmd == CMD_BUILD || cmd == CMD_RUN) {
-        char *default_out = NULL;
-        char *quoted_out = NULL;
-        char *run_cmd = NULL;
-        int rc = 0;
-
-        if (!output_path) {
-            default_out = replace_extension(path, "");
-            if (!default_out) {
-                fprintf(stderr, "error: out of memory\n");
-                free(resolved_path);
-                free(resolved_output);
-                return 1;
-            }
-            output_path = default_out;
-        }
-
-        rc = build_binary(path, output_path);
-        if (rc != 0) {
-            free(default_out);
+            free(test_dir);
+            free(opt_flags);
             free(resolved_path);
             free(resolved_output);
-            return rc;
+            printf("\n%d passed, %d failed\n", passed, failed);
+            return failed > 0 ? 1 : 0;
         }
 
-        if (cmd == CMD_RUN) {
-            quoted_out = shell_quote(output_path);
-            if (!quoted_out) {
-                fprintf(stderr, "error: out of memory\n");
+        if (cmd == CMD_BUILD || cmd == CMD_RUN) {
+            char *default_out = NULL;
+            char *quoted_out = NULL;
+            char *run_cmd = NULL;
+            int rc = 0;
+
+            if (!output_path) {
+                default_out = replace_extension(path, "");
+                if (!default_out) {
+                    fprintf(stderr, "error: out of memory\n");
+                    free(opt_flags);
+                    free(resolved_path);
+                    free(resolved_output);
+                    return 1;
+                }
+                output_path = default_out;
+            }
+
+            rc = build_binary(path, output_path, opt_flags);
+            free(opt_flags);
+            opt_flags = NULL;
+            if (rc != 0) {
                 free(default_out);
                 free(resolved_path);
                 free(resolved_output);
-                return 1;
+                return rc;
             }
 
-            run_cmd = malloc(strlen(quoted_out) + 1);
-            if (!run_cmd) {
-                fprintf(stderr, "error: out of memory\n");
+            if (cmd == CMD_RUN) {
+                quoted_out = shell_quote(output_path);
+                if (!quoted_out) {
+                    fprintf(stderr, "error: out of memory\n");
+                    free(default_out);
+                    free(resolved_path);
+                    free(resolved_output);
+                    return 1;
+                }
+
+                run_cmd = malloc(strlen(quoted_out) + 1);
+                if (!run_cmd) {
+                    fprintf(stderr, "error: out of memory\n");
+                    free(quoted_out);
+                    free(default_out);
+                    free(resolved_path);
+                    free(resolved_output);
+                    return 1;
+                }
+
+                strcpy(run_cmd, quoted_out);
+                rc = system(run_cmd);
+                free(run_cmd);
                 free(quoted_out);
                 free(default_out);
                 free(resolved_path);
                 free(resolved_output);
-                return 1;
+                return rc == 0 ? 0 : 1;
             }
 
-            strcpy(run_cmd, quoted_out);
-            rc = system(run_cmd);
-            free(run_cmd);
-            free(quoted_out);
             free(default_out);
             free(resolved_path);
             free(resolved_output);
-            return rc == 0 ? 0 : 1;
+            return 0;
         }
 
-        free(default_out);
-        free(resolved_path);
-        free(resolved_output);
-        return 0;
-    }
+        free(opt_flags);
 
-    {
-        CompileState state;
-        int rc = 0;
+        {
+            CompileState state;
+            int rc = 0;
 
-        if (!compile_source(path, &state))
-            return 1;
+            if (!compile_source(path, &state))
+                return 1;
 
-        if (cmd == CMD_AST) {
-            ast_dump_node(stdout, state.ast);
-        } else if (cmd == CMD_CHECK) {
-            printf("OK\n");
-        } else {
-            printf("%s", state.codegen.buf);
+            if (cmd == CMD_AST) {
+                ast_dump_node(stdout, state.ast);
+            } else if (cmd == CMD_CHECK) {
+                printf("OK\n");
+            } else {
+                printf("%s", state.codegen.buf);
+            }
+
+            compile_state_free(&state);
+            free(resolved_path);
+            free(resolved_output);
+            return rc;
         }
-
-        compile_state_free(&state);
-        free(resolved_path);
-        free(resolved_output);
-        return rc;
     }
 }

@@ -1,0 +1,11 @@
+package typemismatch;
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    /* passing bool where i32 expected */
+    let result: i32 = add(1, true);
+    return result;
+}

@@ -1,0 +1,30 @@
+package casttest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let i: i32  = 65;
+    let u: u8   = i as u8;
+    let big: i64 = i as i64;
+
+    if u   == 65  { puts("i32_to_u8 ok");  }
+    if big == 65  { puts("i32_to_i64 ok"); }
+
+    /* narrowing truncation: 256 as u8 == 0 */
+    let wide: i32 = 256;
+    let narrow: u8 = wide as u8;
+    if narrow == 0 { puts("truncate ok"); }
+
+    /* widening: i32 -> i64 */
+    let small: i32 = -1;
+    let large: i64 = small as i64;
+    if large == -1 { puts("sign_extend ok"); }
+
+    /* float conversion */
+    let n: i32 = 7;
+    let f: f64 = n as f64;
+    let back: i32 = f as i32;
+    if back == 7 { puts("float ok"); }
+
+    return 0;
+}

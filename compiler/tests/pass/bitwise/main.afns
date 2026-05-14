@@ -1,0 +1,22 @@
+package bitwisetest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let a: i32 = 10;   /* 0b1010 */
+    let b: i32 = 12;   /* 0b1100 */
+
+    if (a & b) == 8   { puts("and ok");  }   /* 0b1000 */
+    if (a | b) == 14  { puts("or ok");   }   /* 0b1110 */
+    if (a ^ b) == 6   { puts("xor ok");  }   /* 0b0110 */
+
+    let c: i32 = 1;
+    if (c << 3) == 8  { puts("shl ok"); }
+    if (a >> 1) == 5  { puts("shr ok"); }
+
+    /* bitwise NOT: ~0 == -1 in two's complement i32 */
+    let z: i32 = 0;
+    if (~z) == -1     { puts("not ok"); }
+
+    return 0;
+}

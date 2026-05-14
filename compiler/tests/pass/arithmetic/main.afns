@@ -1,0 +1,35 @@
+package arithmetic;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn check(label: cstr, got: i32, want: i32) -> void {
+    if got == want {
+        puts(label);
+    }
+}
+
+fn main() -> i32 {
+    /* basic arithmetic */
+    check("add ok",    2 + 3,     5);
+    check("sub ok",    10 - 4,    6);
+    check("mul ok",    3 * 7,     21);
+    check("div ok",    20 / 4,    5);
+    check("mod ok",    17 % 5,    2);
+
+    /* operator precedence: * before + */
+    check("prec ok",   2 + 3 * 4, 14);
+
+    /* negation */
+    let x: i32 = 5;
+    check("neg ok",    -x + 10,   5);
+
+    /* compound assignment */
+    let n: i32 = 10;
+    n += 5;
+    n -= 2;
+    n *= 2;
+    n /= 3;
+    check("compound ok", n, 8);
+
+    return 0;
+}

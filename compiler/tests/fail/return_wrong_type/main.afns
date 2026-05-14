@@ -1,0 +1,9 @@
+package wrongret;
+
+fn get_count() -> i32 {
+    return true;
+}
+
+fn main() -> i32 {
+    return get_count();
+}

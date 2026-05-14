@@ -1,0 +1,31 @@
+package booltest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let t: bool = true;
+    let f: bool = false;
+
+    if t && t           { puts("and_tt ok"); }
+    if !(t && f)        { puts("and_tf ok"); }
+    if t || f           { puts("or_tf ok");  }
+    if !(f || f)        { puts("or_ff ok");  }
+    if !f               { puts("not ok");    }
+
+    /* short-circuit: second operand only evaluated when needed */
+    let x: i32 = 0;
+    if f && (x == 1) {
+        /* should not reach here */
+        puts("FAIL");
+    }
+
+    /* comparison chaining */
+    let a: i32 = 5;
+    if a > 3 && a < 10  { puts("cmp ok");   }
+    if a == 5            { puts("eq ok");    }
+    if a != 4            { puts("neq ok");   }
+    if a >= 5            { puts("ge ok");    }
+    if a <= 5            { puts("le ok");    }
+
+    return 0;
+}

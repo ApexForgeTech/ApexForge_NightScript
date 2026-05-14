@@ -1,0 +1,47 @@
+package ifacetest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+interface Shape {
+    fn area(self: *Self) -> i32;
+    fn perimeter(self: *Self) -> i32;
+}
+
+struct Rect {
+    w: i32;
+    h: i32;
+}
+
+impl Rect : Shape {
+    fn area(self: *Rect) -> i32 {
+        return self.w * self.h;
+    }
+    fn perimeter(self: *Rect) -> i32 {
+        return 2 * (self.w + self.h);
+    }
+}
+
+struct Square {
+    side: i32;
+}
+
+impl Square : Shape {
+    fn area(self: *Square) -> i32 {
+        return self.side * self.side;
+    }
+    fn perimeter(self: *Square) -> i32 {
+        return 4 * self.side;
+    }
+}
+
+fn main() -> i32 {
+    let r: Rect   = Rect   { w: 4, h: 3 };
+    let s: Square = Square { side: 5 };
+
+    if Rect.area(&r)       == 12  { puts("rect_area ok");   }
+    if Rect.perimeter(&r)  == 14  { puts("rect_peri ok");   }
+    if Square.area(&s)     == 25  { puts("sq_area ok");     }
+    if Square.perimeter(&s)== 20  { puts("sq_peri ok");     }
+
+    return 0;
+}

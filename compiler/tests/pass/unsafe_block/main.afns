@@ -1,0 +1,39 @@
+package unsafetest;
+
+extern "C" fn puts(s: cstr) -> i32;
+extern "C" fn malloc(size: usize) -> *u8;
+extern "C" fn free(ptr: *u8) -> void;
+extern "C" fn memset(p: *u8, c: i32, n: usize) -> *u8;
+
+fn raw_add(a: *i32, b: i32) -> i32 {
+    unsafe {
+        return *a + b;
+    }
+}
+
+fn fill(buf: *u8, val: u8, count: usize) -> void {
+    unsafe {
+        let i: usize = 0;
+        while i < count {
+            /* pointer write via memset-style access */
+            memset(buf, val as i32, count);
+            break;
+        }
+    }
+}
+
+fn main() -> i32 {
+    let val: i32 = 41;
+    let result: i32 = raw_add(&val, 1);
+    if result == 42 { puts("unsafe_fn ok"); }
+
+    /* unsafe block for malloc/free */
+    unsafe {
+        let buf: *u8 = malloc(32);
+        memset(buf, 0, 32);
+        free(buf);
+        puts("malloc ok");
+    }
+
+    return 0;
+}

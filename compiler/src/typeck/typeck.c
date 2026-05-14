@@ -512,9 +512,8 @@ static int is_assignable(Type *expected, Type *actual) {
     if (actual->kind == TYPE_STRING_LITERAL &&
         (expected->kind == TYPE_STR || expected->kind == TYPE_CSTR))
         return 1;
-    if (actual->kind == TYPE_NULL &&
-        expected->kind == TYPE_POINTER &&
-        expected->is_nullable)
+    /* null is assignable to any pointer type — raw pointers need null initialization */
+    if (actual->kind == TYPE_NULL && expected->kind == TYPE_POINTER)
         return 1;
 
     return 0;
@@ -2165,8 +2164,13 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
                     return 0;
                 }
             }
-            if (stmt->as.for_stmt.post)
-                (void)check_expr(c, for_scope, stmt->as.for_stmt.post, unsafe_depth);
+            if (stmt->as.for_stmt.post) {
+                Type *post_t = check_expr(c, for_scope, stmt->as.for_stmt.post, unsafe_depth);
+                if (post_t->kind == TYPE_ERROR) {
+                    scope_free(for_scope);
+                    return 0;
+                }
+            }
 
             Scope *body_scope = scope_new(for_scope);
             if (!body_scope) { scope_free(for_scope); return 0; }
@@ -2194,9 +2198,10 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
         case NODE_CONTINUE:
             return 1;
 
-        case NODE_DEFER:
-            (void)check_expr(c, scope, stmt->as.defer_stmt.expr, unsafe_depth);
-            return !c->had_error;
+        case NODE_DEFER: {
+            Type *defer_t = check_expr(c, scope, stmt->as.defer_stmt.expr, unsafe_depth);
+            return defer_t->kind != TYPE_ERROR;
+        }
 
         case NODE_EXPR_STMT:
             (void)check_expr(c, scope, stmt->as.expr_stmt.expr, unsafe_depth);
