@@ -9,4 +9,3 @@ docs/
 *.out
 compiler/build/
 .*
-!.gitattributes
