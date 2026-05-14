@@ -70,6 +70,7 @@ typedef struct {
     const char *source_name;
     const SemanticModel *sema;
     Type *current_return_type;
+    const char *current_package;
     int had_error;
     TypeAlloc *allocs;
 } Checker;
@@ -253,10 +254,144 @@ static Node *find_method_decl(const SemanticModel *sema, const char *owner, cons
     return NULL;
 }
 
+static const char *node_package_name(Node *node) {
+    if (!node)
+        return NULL;
+
+    switch (node->kind) {
+        case NODE_FN_DECL:
+            return node->as.fn.package_name;
+        case NODE_EXTERN_FN:
+            return node->as.extern_fn.package_name;
+        case NODE_STRUCT_DECL:
+            return node->as.struct_decl.package_name;
+        case NODE_ENUM_DECL:
+            return node->as.enum_decl.package_name;
+        case NODE_UNION_DECL:
+            return node->as.union_decl.package_name;
+        case NODE_INTERFACE_DECL:
+            return node->as.interface_decl.package_name;
+        default:
+            return NULL;
+    }
+}
+
+static int node_is_public(Node *node) {
+    if (!node)
+        return 0;
+
+    switch (node->kind) {
+        case NODE_FN_DECL:
+            return node->as.fn.is_public;
+        case NODE_EXTERN_FN:
+            return node->as.extern_fn.is_public;
+        case NODE_STRUCT_DECL:
+            return node->as.struct_decl.is_public;
+        case NODE_ENUM_DECL:
+            return node->as.enum_decl.is_public;
+        case NODE_UNION_DECL:
+            return node->as.union_decl.is_public;
+        case NODE_INTERFACE_DECL:
+            return node->as.interface_decl.is_public;
+        default:
+            return 0;
+    }
+}
+
+static int same_package_name(const char *a, const char *b) {
+    if (a == b)
+        return 1;
+    if (!a || !b)
+        return 0;
+    return !strcmp(a, b);
+}
+
+static int decl_visible_from(Checker *c, Node *node) {
+    if (!node)
+        return 0;
+    if (node_is_public(node))
+        return 1;
+    return same_package_name(c->current_package, node_package_name(node));
+}
+
+static int require_decl_visible(Checker *c, Node *node, int line, int col, const char *name) {
+    if (decl_visible_from(c, node))
+        return 1;
+
+    typeck_error(c, line, col,
+                 "symbol '%s' is private to package '%s'",
+                 name,
+                 node_package_name(node) ? node_package_name(node) : "<unknown>");
+    return 0;
+}
+
 static int is_integer_kind(TypeKind kind) {
     return kind == TYPE_CHAR || kind == TYPE_I8 || kind == TYPE_I16 || kind == TYPE_I32 || kind == TYPE_I64 ||
            kind == TYPE_ISIZE || kind == TYPE_U8 || kind == TYPE_U16 || kind == TYPE_U32 ||
            kind == TYPE_U64 || kind == TYPE_USIZE || kind == TYPE_INT_LITERAL;
+}
+
+static int ensure_type_visible(Checker *c, Node *type_node, int line, int col) {
+    Node *decl;
+
+    if (!type_node)
+        return 1;
+
+    switch (type_node->kind) {
+        case NODE_TYPE_POINTER:
+            return ensure_type_visible(c, type_node->as.type_ptr.inner, line, col);
+        case NODE_TYPE_ARRAY:
+            return ensure_type_visible(c, type_node->as.type_array.elem, line, col);
+        case NODE_TYPE_NAMED:
+            decl = find_named_node(c->sema->structs, c->sema->struct_count,
+                                   type_node->as.type_named.name, NODE_STRUCT_DECL);
+            if (!decl)
+                decl = find_named_node(c->sema->enums, c->sema->enum_count,
+                                       type_node->as.type_named.name, NODE_ENUM_DECL);
+            if (!decl)
+                decl = find_named_node(c->sema->unions, c->sema->union_count,
+                                       type_node->as.type_named.name, NODE_UNION_DECL);
+            if (!decl)
+                return 1;
+            return require_decl_visible(c, decl, line, col, type_node->as.type_named.name);
+        default:
+            return 1;
+    }
+}
+
+static int ensure_resolved_type_visible(Checker *c, Type *type, int line, int col) {
+    Node *decl;
+
+    if (!type)
+        return 1;
+
+    switch (type->kind) {
+        case TYPE_FUNCTION:
+            return require_decl_visible(c, type->decl, line, col,
+                                        type->decl && type->decl->kind == NODE_EXTERN_FN
+                                            ? type->decl->as.extern_fn.name
+                                            : (type->decl ? type->decl->as.fn.name : "<function>"));
+        case TYPE_POINTER:
+            return ensure_resolved_type_visible(c, type->inner, line, col);
+        case TYPE_ARRAY:
+            return ensure_resolved_type_visible(c, type->inner, line, col);
+        case TYPE_NAMED:
+            if (!strcmp(type->name, "String"))
+                return 1;
+            decl = find_named_node(c->sema->structs, c->sema->struct_count,
+                                   type->name, NODE_STRUCT_DECL);
+            if (!decl)
+                decl = find_named_node(c->sema->enums, c->sema->enum_count,
+                                       type->name, NODE_ENUM_DECL);
+            if (!decl)
+                decl = find_named_node(c->sema->unions, c->sema->union_count,
+                                       type->name, NODE_UNION_DECL);
+            if (!decl)
+                return 1;
+            return require_decl_visible(c, decl, line, col, type->name);
+        default:
+            return 1;
+    }
 }
 
 static int is_float_kind(TypeKind kind) {
@@ -272,6 +407,7 @@ static int is_addressable(Node *expr) {
            (expr->kind == NODE_IDENT  ||
             expr->kind == NODE_FIELD  ||
             expr->kind == NODE_INDEX  ||
+            expr->kind == NODE_SLICE  ||
             (expr->kind == NODE_UNARY && expr->as.unary.op && expr->as.unary.op[0] == '*'));
 }
 
@@ -646,6 +782,81 @@ static int check_contextual_constructor(Checker *c, Scope *scope, Type *expected
     return 0;
 }
 
+static NodeList *enum_variant_fields(Node *decl, const char *variant);
+
+static int get_match_binding_types(Checker *c, Type *subject_type, const char *pattern,
+                                   Type ***out_types, int *out_count) {
+    Type **items = NULL;
+    int count = 0;
+
+    *out_types = NULL;
+    *out_count = 0;
+
+    if (is_option_type(subject_type)) {
+        if (!strcmp(pattern, "Some")) {
+            char *inner_name = option_inner_name(subject_type);
+            Type *inner_type = inner_name ? type_from_name_text(c, inner_name) : &TYPE_ERROR_VALUE;
+            items = malloc(sizeof(Type *));
+            if (!items)
+                return 0;
+            items[0] = inner_type;
+            count = 1;
+        } else if (!strcmp(pattern, "None")) {
+            count = 0;
+        } else {
+            return 0;
+        }
+    } else if (is_result_type(subject_type)) {
+        char *ok_name = NULL;
+        char *err_name = NULL;
+        if (!result_inner_names(subject_type, &ok_name, &err_name))
+            return 0;
+        if (!strcmp(pattern, "Ok")) {
+            items = malloc(sizeof(Type *));
+            if (!items)
+                return 0;
+            items[0] = type_from_name_text(c, ok_name);
+            count = 1;
+        } else if (!strcmp(pattern, "Err")) {
+            items = malloc(sizeof(Type *));
+            if (!items)
+                return 0;
+            items[0] = type_from_name_text(c, err_name);
+            count = 1;
+        } else {
+            return 0;
+        }
+    } else {
+        const char *dot = strchr(pattern, '.');
+        char enum_name[128];
+        const char *variant_name;
+        Node *enum_decl;
+        NodeList *fields;
+
+        if (!dot)
+            return 0;
+        memcpy(enum_name, pattern, (size_t)(dot - pattern));
+        enum_name[dot - pattern] = '\0';
+        variant_name = dot + 1;
+        enum_decl = find_named_node(c->sema->enums, c->sema->enum_count, enum_name, NODE_ENUM_DECL);
+        if (!enum_decl)
+            return 0;
+        fields = enum_variant_fields(enum_decl, variant_name);
+        count = fields ? fields->count : 0;
+        if (count > 0) {
+            items = malloc((size_t)count * sizeof(Type *));
+            if (!items)
+                return 0;
+            for (int i = 0; i < count; i++)
+                items[i] = type_from_ast(c, fields->items[i]->as.let.type);
+        }
+    }
+
+    *out_types = items;
+    *out_count = count;
+    return 1;
+}
+
 static Type *check_try_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) {
     Type *operand;
     char actual_buf[128];
@@ -860,6 +1071,10 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
     for (int i = 0; i < expr->as.match.count; i++) {
         const char *pattern = expr->as.match.patterns[i];
         Type *arm_type;
+        Scope *arm_scope = NULL;
+        Type **binding_types = NULL;
+        int binding_type_count = 0;
+        int declared_binding_count = expr->as.match.binding_counts[i];
 
         if (!strcmp(pattern, "_")) {
             if (saw_wildcard) {
@@ -927,7 +1142,47 @@ static Type *check_match_expr(Checker *c, Scope *scope, Node *expr, int unsafe_d
                 seen_variants[seen_count++] = variant_name;
         }
 
-        arm_type = check_expr(c, scope, expr->as.match.values[i], unsafe_depth);
+        if (!strcmp(pattern, "_")) {
+            if (expr->as.match.binding_counts[i] != 0) {
+                typeck_error(c, expr->line, expr->col,
+                             "wildcard match arm cannot declare bindings");
+                return &TYPE_ERROR_VALUE;
+            }
+        } else if (!get_match_binding_types(c, subject_type, pattern, &binding_types, &binding_type_count)) {
+            typeck_error(c, expr->line, expr->col,
+                         "invalid match pattern '%s'", pattern);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        if (declared_binding_count != 0 &&
+            binding_type_count != declared_binding_count) {
+            typeck_error(c, expr->line, expr->col,
+                         "match arm '%s' expects %d bindings, got %d",
+                         pattern, binding_type_count, declared_binding_count);
+            free(binding_types);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        arm_scope = scope_new(scope);
+        if (!arm_scope) {
+            free(binding_types);
+            return &TYPE_ERROR_VALUE;
+        }
+
+        for (int j = 0; j < declared_binding_count; j++) {
+            if (!scope_define(arm_scope, expr->as.match.binding_names[i][j], binding_types[j], 0)) {
+                typeck_error(c, expr->line, expr->col,
+                             "duplicate match binding '%s'",
+                             expr->as.match.binding_names[i][j]);
+                free(binding_types);
+                scope_free(arm_scope);
+                return &TYPE_ERROR_VALUE;
+            }
+        }
+
+        arm_type = check_expr(c, arm_scope, expr->as.match.values[i], unsafe_depth);
+        free(binding_types);
+        scope_free(arm_scope);
         if (!result_type) {
             result_type = arm_type;
         } else if (!(is_assignable(result_type, arm_type) || is_assignable(arm_type, result_type))) {
@@ -1028,7 +1283,11 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
             Binding *binding = scope_resolve(scope, expr->as.ident.name);
             Node *fn;
 
-            if (binding) return binding->type;
+            if (binding) {
+                if (!ensure_resolved_type_visible(c, binding->type, expr->line, expr->col))
+                    return &TYPE_ERROR_VALUE;
+                return binding->type;
+            }
 
             if (!strcmp(expr->as.ident.name, "None")) {
                 typeck_error(c, expr->line, expr->col,
@@ -1041,7 +1300,11 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
             if (!fn)
                 fn = find_named_node(c->sema->extern_functions, c->sema->extern_function_count,
                                      expr->as.ident.name, NODE_EXTERN_FN);
-            if (fn) return make_function_type(c, fn);
+            if (fn) {
+                if (!require_decl_visible(c, fn, expr->line, expr->col, expr->as.ident.name))
+                    return &TYPE_ERROR_VALUE;
+                return make_function_type(c, fn);
+            }
 
             return &TYPE_ERROR_VALUE;
         }
@@ -1092,6 +1355,16 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                     return &TYPE_ERROR_VALUE;
                 }
                 return operand->inner;
+            }
+
+            if (!strcmp(expr->as.unary.op, "~")) {
+                if (!is_integer_kind(operand->kind)) {
+                    format_type(operand, actual_buf, sizeof(actual_buf));
+                    typeck_error(c, expr->line, expr->col,
+                                 "operator ~ requires integer type, got %s", actual_buf);
+                    return &TYPE_ERROR_VALUE;
+                }
+                return operand;
             }
 
             return &TYPE_ERROR_VALUE;
@@ -1154,6 +1427,19 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                     return &TYPE_ERROR_VALUE;
                 }
                 return &TYPE_BOOL_VALUE;
+            }
+
+            if (!strcmp(op, "&") || !strcmp(op, "|") || !strcmp(op, "^") ||
+                !strcmp(op, "<<") || !strcmp(op, ">>")) {
+                if (!is_integer_kind(left->kind) || !is_integer_kind(right->kind)) {
+                    format_type(left, expected_buf, sizeof(expected_buf));
+                    format_type(right, actual_buf, sizeof(actual_buf));
+                    typeck_error(c, expr->line, expr->col,
+                                 "bitwise operator %s requires integer operands, got %s and %s",
+                                 op, expected_buf, actual_buf);
+                    return &TYPE_ERROR_VALUE;
+                }
+                return (left->kind == TYPE_INT_LITERAL) ? right : left;
             }
 
             return &TYPE_ERROR_VALUE;
@@ -1221,11 +1507,55 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 return obj_type->inner ? obj_type->inner : &TYPE_ERROR_VALUE;
             if (obj_type->kind == TYPE_POINTER)
                 return obj_type->inner ? obj_type->inner : &TYPE_ERROR_VALUE;
+            if (obj_type->kind == TYPE_STR)
+                return &TYPE_U8_VALUE;
+            if (obj_type->kind == TYPE_NAMED && !strcmp(obj_type->name, "String"))
+                return &TYPE_U8_VALUE;
 
             if (obj_type->kind != TYPE_ERROR) {
                 format_type(obj_type, actual_buf, sizeof(actual_buf));
                 typeck_error(c, expr->line, expr->col,
                              "cannot index into type %s", actual_buf);
+            }
+            return &TYPE_ERROR_VALUE;
+        }
+
+        case NODE_SLICE: {
+            Type *obj_type = check_expr(c, scope, expr->as.slice_expr.object, unsafe_depth);
+            Type *start_type = expr->as.slice_expr.start
+                ? check_expr(c, scope, expr->as.slice_expr.start, unsafe_depth)
+                : NULL;
+            Type *end_type = expr->as.slice_expr.end
+                ? check_expr(c, scope, expr->as.slice_expr.end, unsafe_depth)
+                : NULL;
+
+            if (start_type && start_type->kind != TYPE_ERROR &&
+                !is_integer_kind(start_type->kind)) {
+                format_type(start_type, actual_buf, sizeof(actual_buf));
+                typeck_error(c, expr->line, expr->col,
+                             "slice start must be an integer, got %s", actual_buf);
+                return &TYPE_ERROR_VALUE;
+            }
+
+            if (end_type && end_type->kind != TYPE_ERROR &&
+                !is_integer_kind(end_type->kind)) {
+                format_type(end_type, actual_buf, sizeof(actual_buf));
+                typeck_error(c, expr->line, expr->col,
+                             "slice end must be an integer, got %s", actual_buf);
+                return &TYPE_ERROR_VALUE;
+            }
+
+            if (obj_type->kind == TYPE_STR)
+                return &TYPE_STR_VALUE;
+            if (obj_type->kind == TYPE_NAMED && !strcmp(obj_type->name, "String"))
+                return &TYPE_STR_VALUE;
+            if (obj_type->kind == TYPE_ARRAY)
+                return make_array_type(c, obj_type->inner, -1);
+
+            if (obj_type->kind != TYPE_ERROR) {
+                format_type(obj_type, actual_buf, sizeof(actual_buf));
+                typeck_error(c, expr->line, expr->col,
+                             "cannot slice type %s", actual_buf);
             }
             return &TYPE_ERROR_VALUE;
         }
@@ -1248,9 +1578,37 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 Node *object = callee->as.field.object;
 
                 if (object->kind == NODE_IDENT) {
+                    if (!strcmp(object->as.ident.name, "String") &&
+                        !strcmp(callee->as.field.field, "from")) {
+                        Type *arg_type;
+
+                        if (expr->as.call.args.count != 1) {
+                            typeck_error(c, expr->line, expr->col,
+                                         "String.from expects 1 argument, got %d",
+                                         expr->as.call.args.count);
+                            return &TYPE_ERROR_VALUE;
+                        }
+
+                        arg_type = check_expr(c, scope, expr->as.call.args.items[0], unsafe_depth);
+                        if (!(is_assignable(&TYPE_STR_VALUE, arg_type) ||
+                              is_assignable(&TYPE_CSTR_VALUE, arg_type))) {
+                            format_type(arg_type, actual_buf, sizeof(actual_buf));
+                            typeck_error(c, expr->as.call.args.items[0]->line,
+                                         expr->as.call.args.items[0]->col,
+                                         "String.from expects str or cstr, got %s",
+                                         actual_buf);
+                            return &TYPE_ERROR_VALUE;
+                        }
+
+                        return make_named_type(c, "String");
+                    }
+
                     Node *enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
                                                       object->as.ident.name, NODE_ENUM_DECL);
                     if (enum_decl && enum_has_variant(enum_decl, callee->as.field.field)) {
+                        if (!require_decl_visible(c, enum_decl, expr->line, expr->col,
+                                                  object->as.ident.name))
+                            return &TYPE_ERROR_VALUE;
                         NodeList *fields = enum_variant_fields(enum_decl, callee->as.field.field);
                         int expected = fields ? fields->count : 0;
 
@@ -1283,13 +1641,20 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 if (object->kind == NODE_IDENT) {
                     Node *method = find_method_decl(c->sema, object->as.ident.name, callee->as.field.field);
                     if (method) {
+                        if (!require_decl_visible(c, method, expr->line, expr->col, callee->as.field.field))
+                            return &TYPE_ERROR_VALUE;
                         /* Type.method(args...) — receiver passed explicitly as first arg */
                         if (!check_call_arguments(c, &method->as.fn.params, 0,
                                                   &expr->as.call.args, scope, unsafe_depth,
                                                   expr->line, expr->col)) {
                             return &TYPE_ERROR_VALUE;
                         }
-                        return type_from_ast(c, method->as.fn.ret_type);
+                        {
+                            Type *ret_type = type_from_ast(c, method->as.fn.ret_type);
+                            if (!ensure_resolved_type_visible(c, ret_type, expr->line, expr->col))
+                                return &TYPE_ERROR_VALUE;
+                            return ret_type;
+                        }
                     }
                 }
 
@@ -1299,6 +1664,58 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                     Node *method;
                     Type *receiver_expected;
 
+                    if (object_type->kind == TYPE_NAMED &&
+                        !strcmp(object_type->name, "String")) {
+                        if (!strcmp(callee->as.field.field, "free")) {
+                            if (expr->as.call.args.count != 0) {
+                                typeck_error(c, expr->line, expr->col,
+                                             "String.free expects 0 arguments, got %d",
+                                             expr->as.call.args.count);
+                                return &TYPE_ERROR_VALUE;
+                            }
+                            if (!is_addressable(object)) {
+                                typeck_error(c, object->line, object->col,
+                                             "String.free requires an addressable receiver");
+                                return &TYPE_ERROR_VALUE;
+                            }
+                            return &TYPE_VOID_VALUE;
+                        }
+
+                        if (!strcmp(callee->as.field.field, "as_str")) {
+                            if (expr->as.call.args.count != 0) {
+                                typeck_error(c, expr->line, expr->col,
+                                             "String.as_str expects 0 arguments, got %d",
+                                             expr->as.call.args.count);
+                                return &TYPE_ERROR_VALUE;
+                            }
+                            return &TYPE_STR_VALUE;
+                        }
+                    }
+
+                    if (object_type->kind == TYPE_POINTER && object_type->inner &&
+                        object_type->inner->kind == TYPE_NAMED &&
+                        !strcmp(object_type->inner->name, "String")) {
+                        if (!strcmp(callee->as.field.field, "free")) {
+                            if (expr->as.call.args.count != 0) {
+                                typeck_error(c, expr->line, expr->col,
+                                             "String.free expects 0 arguments, got %d",
+                                             expr->as.call.args.count);
+                                return &TYPE_ERROR_VALUE;
+                            }
+                            return &TYPE_VOID_VALUE;
+                        }
+
+                        if (!strcmp(callee->as.field.field, "as_str")) {
+                            if (expr->as.call.args.count != 0) {
+                                typeck_error(c, expr->line, expr->col,
+                                             "String.as_str expects 0 arguments, got %d",
+                                             expr->as.call.args.count);
+                                return &TYPE_ERROR_VALUE;
+                            }
+                            return &TYPE_STR_VALUE;
+                        }
+                    }
+
                     if (object_type->kind == TYPE_NAMED) owner = object_type->name;
                     if (object_type->kind == TYPE_POINTER && object_type->inner &&
                         object_type->inner->kind == TYPE_NAMED) {
@@ -1307,6 +1724,8 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
 
                     method = owner ? find_method_decl(c->sema, owner, callee->as.field.field) : NULL;
                     if (method) {
+                        if (!require_decl_visible(c, method, expr->line, expr->col, callee->as.field.field))
+                            return &TYPE_ERROR_VALUE;
                         if (!method_has_receiver(method)) {
                             typeck_error(c, callee->line, callee->col,
                                          "associated function '%s.%s' must be called on the type",
@@ -1322,7 +1741,12 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                                                   expr->line, expr->col)) {
                             return &TYPE_ERROR_VALUE;
                         }
-                        return type_from_ast(c, method->as.fn.ret_type);
+                        {
+                            Type *ret_type = type_from_ast(c, method->as.fn.ret_type);
+                            if (!ensure_resolved_type_visible(c, ret_type, expr->line, expr->col))
+                                return &TYPE_ERROR_VALUE;
+                            return ret_type;
+                        }
                     }
                 }
             }
@@ -1341,7 +1765,12 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                                           expr->line, expr->col)) {
                     return &TYPE_ERROR_VALUE;
                 }
-                return type_from_ast(c, callee_type->decl->as.fn.ret_type);
+                {
+                    Type *ret_type = type_from_ast(c, callee_type->decl->as.fn.ret_type);
+                    if (!ensure_resolved_type_visible(c, ret_type, expr->line, expr->col))
+                        return &TYPE_ERROR_VALUE;
+                    return ret_type;
+                }
             }
 
             if (!check_call_arguments(c, &callee_type->decl->as.extern_fn.params, 0,
@@ -1349,7 +1778,12 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                                       expr->line, expr->col)) {
                 return &TYPE_ERROR_VALUE;
             }
-            return type_from_ast(c, callee_type->decl->as.extern_fn.ret_type);
+            {
+                Type *ret_type = type_from_ast(c, callee_type->decl->as.extern_fn.ret_type);
+                if (!ensure_resolved_type_visible(c, ret_type, expr->line, expr->col))
+                    return &TYPE_ERROR_VALUE;
+                return ret_type;
+            }
         }
 
         case NODE_CAST: {
@@ -1372,11 +1806,18 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
             if (object->kind == NODE_IDENT) {
                 Node *enum_decl = find_named_node(c->sema->enums, c->sema->enum_count,
                                                   object->as.ident.name, NODE_ENUM_DECL);
-                if (enum_decl && enum_has_variant(enum_decl, expr->as.field.field))
+                if (enum_decl && enum_has_variant(enum_decl, expr->as.field.field)) {
+                    if (!require_decl_visible(c, enum_decl, expr->line, expr->col, object->as.ident.name))
+                        return &TYPE_ERROR_VALUE;
                     return make_named_type(c, object->as.ident.name);
+                }
 
-                if (find_method_decl(c->sema, object->as.ident.name, expr->as.field.field))
-                    return make_function_type(c, find_method_decl(c->sema, object->as.ident.name, expr->as.field.field));
+                if (find_method_decl(c->sema, object->as.ident.name, expr->as.field.field)) {
+                    Node *method = find_method_decl(c->sema, object->as.ident.name, expr->as.field.field);
+                    if (!require_decl_visible(c, method, expr->line, expr->col, expr->as.field.field))
+                        return &TYPE_ERROR_VALUE;
+                    return make_function_type(c, method);
+                }
             }
 
             {
@@ -1393,6 +1834,32 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
 
                     typeck_error(c, expr->line, expr->col,
                                  "unknown field '%s' for slice type",
+                                 expr->as.field.field);
+                    return &TYPE_ERROR_VALUE;
+                }
+
+                if (object_type->kind == TYPE_STR) {
+                    if (!strcmp(expr->as.field.field, "len"))
+                        return &TYPE_USIZE_VALUE;
+                    if (!strcmp(expr->as.field.field, "ptr"))
+                        return make_pointer_type(c, &TYPE_U8_VALUE, 1, 0);
+
+                    typeck_error(c, expr->line, expr->col,
+                                 "unknown field '%s' for str",
+                                 expr->as.field.field);
+                    return &TYPE_ERROR_VALUE;
+                }
+
+                if (object_type->kind == TYPE_NAMED && !strcmp(object_type->name, "String")) {
+                    if (!strcmp(expr->as.field.field, "len"))
+                        return &TYPE_USIZE_VALUE;
+                    if (!strcmp(expr->as.field.field, "cap"))
+                        return &TYPE_USIZE_VALUE;
+                    if (!strcmp(expr->as.field.field, "ptr"))
+                        return make_pointer_type(c, &TYPE_U8_VALUE, 0, 0);
+
+                    typeck_error(c, expr->line, expr->col,
+                                 "unknown field '%s' for String",
                                  expr->as.field.field);
                     return &TYPE_ERROR_VALUE;
                 }
@@ -1434,7 +1901,12 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                     return &TYPE_ERROR_VALUE;
                 }
 
-                return type_from_ast(c, field_node->as.let.type);
+                {
+                    Type *field_type = type_from_ast(c, field_node->as.let.type);
+                    if (!ensure_resolved_type_visible(c, field_type, expr->line, expr->col))
+                        return &TYPE_ERROR_VALUE;
+                    return field_type;
+                }
             }
         }
 
@@ -1446,6 +1918,9 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                                        expr->as.struct_lit.type_name, NODE_UNION_DECL);
 
             if (!decl)
+                return &TYPE_ERROR_VALUE;
+            if (!require_decl_visible(c, decl, expr->line, expr->col,
+                                      expr->as.struct_lit.type_name))
                 return &TYPE_ERROR_VALUE;
 
             for (int i = 0; i < expr->as.struct_lit.count; i++) {
@@ -1498,6 +1973,9 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
 
     switch (stmt->kind) {
         case NODE_LET:
+            if (stmt->as.let.type &&
+                !ensure_type_visible(c, stmt->as.let.type, stmt->line, stmt->col))
+                return 0;
             declared = stmt->as.let.type ? type_from_ast(c, stmt->as.let.type) : NULL;
             actual = NULL;
             if (stmt->as.let.value) {
@@ -1540,6 +2018,9 @@ static int check_stmt(Checker *c, Scope *scope, Node *stmt, Type *expected_retur
             return 1;
 
         case NODE_CONST:
+            if (stmt->as.konst.type &&
+                !ensure_type_visible(c, stmt->as.konst.type, stmt->line, stmt->col))
+                return 0;
             declared = stmt->as.konst.type ? type_from_ast(c, stmt->as.konst.type) : NULL;
             actual = NULL;
             if (!declared || !check_contextual_constructor(c, scope, declared,
@@ -1741,9 +2222,18 @@ static int check_function(Checker *c, Node *fn_decl) {
     Scope *scope = scope_new(NULL);
     Type *return_type = type_from_ast(c, fn_decl->as.fn.ret_type);
     Type *prev_return_type = c->current_return_type;
+    const char *prev_package = c->current_package;
 
     if (!scope) {
         typeck_error(c, fn_decl->line, fn_decl->col, "out of memory");
+        return 0;
+    }
+
+    c->current_package = fn_decl->as.fn.package_name;
+
+    if (!ensure_type_visible(c, fn_decl->as.fn.ret_type, fn_decl->line, fn_decl->col)) {
+        c->current_package = prev_package;
+        scope_free(scope);
         return 0;
     }
 
@@ -1765,8 +2255,14 @@ static int check_function(Checker *c, Node *fn_decl) {
 
     for (int i = 0; i < fn_decl->as.fn.params.count; i++) {
         Node *param = fn_decl->as.fn.params.items[i];
+        if (!ensure_type_visible(c, param->as.let.type, param->line, param->col)) {
+            c->current_package = prev_package;
+            scope_free(scope);
+            return 0;
+        }
         if (!scope_define(scope, param->as.let.name,
                           type_from_ast(c, param->as.let.type), 1)) {
+            c->current_package = prev_package;
             scope_free(scope);
             return 0;
         }
@@ -1775,11 +2271,13 @@ static int check_function(Checker *c, Node *fn_decl) {
     c->current_return_type = return_type;
     if (!check_block(c, scope, fn_decl->as.fn.body, return_type, 0)) {
         c->current_return_type = prev_return_type;
+        c->current_package = prev_package;
         scope_free(scope);
         return 0;
     }
 
     c->current_return_type = prev_return_type;
+    c->current_package = prev_package;
     scope_free(scope);
     return !c->had_error;
 }

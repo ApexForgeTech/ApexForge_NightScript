@@ -413,6 +413,11 @@ static void collect_slice_types_in_node(SliceDef **defs, Node *node) {
             collect_slice_types_in_node(defs, node->as.index_expr.object);
             collect_slice_types_in_node(defs, node->as.index_expr.index);
             return;
+        case NODE_SLICE:
+            collect_slice_types_in_node(defs, node->as.slice_expr.object);
+            collect_slice_types_in_node(defs, node->as.slice_expr.start);
+            collect_slice_types_in_node(defs, node->as.slice_expr.end);
+            return;
         case NODE_DEFER:
             collect_slice_types_in_node(defs, node->as.defer_stmt.expr);
             return;
@@ -536,6 +541,11 @@ static void collect_option_result_types_in_node(OptionResultDef **defs, Node *no
         case NODE_INDEX:
             collect_option_result_types_in_node(defs, node->as.index_expr.object);
             collect_option_result_types_in_node(defs, node->as.index_expr.index);
+            return;
+        case NODE_SLICE:
+            collect_option_result_types_in_node(defs, node->as.slice_expr.object);
+            collect_option_result_types_in_node(defs, node->as.slice_expr.start);
+            collect_option_result_types_in_node(defs, node->as.slice_expr.end);
             return;
         case NODE_DEFER:
             collect_option_result_types_in_node(defs, node->as.defer_stmt.expr);
@@ -664,7 +674,8 @@ static void emit_type_left(COut *o, Node *t) {
             else if (!strcmp(name, "char"))  emit(o, "char");
             else if (!strcmp(name, "void"))  emit(o, "void");
             else if (!strcmp(name, "never")) emit(o, "void");
-            else if (!strcmp(name, "str"))   emit(o, "const char*");
+            else if (!strcmp(name, "str"))   emit(o, "NStr");
+            else if (!strcmp(name, "String")) emit(o, "NString");
             else if (!strcmp(name, "cstr"))  emit(o, "const char*");
             else if (type_name_has_form(name, "Option") || type_name_has_form(name, "Result")) {
                 char c_name[256];
@@ -843,6 +854,16 @@ static Node *cg_temp_type_pointer(CGContext *cg, Node *inner, int is_const) {
     return &temp->node;
 }
 
+static Node *cg_temp_type_array(CGContext *cg, Node *elem, int length) {
+    CGTempType *temp = calloc(1, sizeof(CGTempType));
+    temp->node.kind = NODE_TYPE_ARRAY;
+    temp->node.as.type_array.elem = elem;
+    temp->node.as.type_array.length = length;
+    temp->next = cg->temps;
+    cg->temps = temp;
+    return &temp->node;
+}
+
 static void emit_expr(COut *o, CGContext *cg, Node *n);
 
 static void cg_free_temps(CGContext *cg) {
@@ -901,7 +922,8 @@ static Node *find_decl_named(Node *program, NodeKind kind, const char *name) {
 }
 
 static int is_known_type_name(CGContext *cg, const char *name) {
-    return find_decl_named(cg->program, NODE_STRUCT_DECL, name) ||
+    return !strcmp(name, "String") ||
+           find_decl_named(cg->program, NODE_STRUCT_DECL, name) ||
            find_decl_named(cg->program, NODE_ENUM_DECL, name) ||
            find_decl_named(cg->program, NODE_UNION_DECL, name);
 }
@@ -1003,10 +1025,12 @@ static int expr_is_addressable(Node *expr) {
            (expr->kind == NODE_IDENT  ||
             expr->kind == NODE_FIELD  ||
             expr->kind == NODE_INDEX  ||
+            expr->kind == NODE_SLICE  ||
             (expr->kind == NODE_UNARY && expr->as.unary.op && expr->as.unary.op[0] == '*'));
 }
 
 static Node *infer_expr_type(CGContext *cg, Node *expr);
+static Node *cg_temp_type_from_name(CGContext *cg, const char *name);
 static void emit_expr(COut *o, CGContext *cg, Node *n);
 static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type);
 
@@ -1031,6 +1055,76 @@ static int result_inner_name_texts(const char *name, char **ok_name, char **err_
     ok = split_top_level_comma(inner, ok_name, err_name);
     free(inner);
     return ok;
+}
+
+static int get_match_binding_type_nodes(CGContext *cg, Node *subject_type, const char *pattern,
+                                        Node ***out_types, int *out_count) {
+    Node **items = NULL;
+    int count = 0;
+
+    *out_types = NULL;
+    *out_count = 0;
+    if (!subject_type || subject_type->kind != NODE_TYPE_NAMED)
+        return 0;
+
+    if (type_name_has_form(subject_type->as.type_named.name, "Option")) {
+        if (!strcmp(pattern, "Some")) {
+            char *inner_name = option_inner_name_text(subject_type->as.type_named.name);
+            items = malloc(sizeof(Node *));
+            if (!items)
+                return 0;
+            items[0] = cg_temp_type_from_name(cg, inner_name);
+            count = 1;
+        } else if (!strcmp(pattern, "None")) {
+            count = 0;
+        } else {
+            return 0;
+        }
+    } else if (type_name_has_form(subject_type->as.type_named.name, "Result")) {
+        char *ok_name = NULL;
+        char *err_name = NULL;
+        if (!result_inner_name_texts(subject_type->as.type_named.name, &ok_name, &err_name))
+            return 0;
+        items = malloc(sizeof(Node *));
+        if (!items)
+            return 0;
+        if (!strcmp(pattern, "Ok")) {
+            items[0] = cg_temp_type_from_name(cg, ok_name);
+            count = 1;
+        } else if (!strcmp(pattern, "Err")) {
+            items[0] = cg_temp_type_from_name(cg, err_name);
+            count = 1;
+        } else {
+            return 0;
+        }
+    } else {
+        NodeList *fields = NULL;
+        const char *dot = strchr(pattern, '.');
+        Node *enum_decl;
+        char enum_name[128];
+        const char *variant_name;
+
+        if (!dot)
+            return 0;
+        memcpy(enum_name, pattern, (size_t)(dot - pattern));
+        enum_name[dot - pattern] = '\0';
+        variant_name = dot + 1;
+        enum_decl = find_enum_variant_decl(cg, enum_name, variant_name, &fields);
+        if (!enum_decl)
+            return 0;
+        count = fields ? fields->count : 0;
+        if (count > 0) {
+            items = malloc((size_t)count * sizeof(Node *));
+            if (!items)
+                return 0;
+            for (int i = 0; i < count; i++)
+                items[i] = fields->items[i]->as.let.type;
+        }
+    }
+
+    *out_types = items;
+    *out_count = count;
+    return 1;
 }
 
 static Node *cg_temp_type_from_name(CGContext *cg, const char *name) {
@@ -1127,32 +1221,208 @@ static Node *try_unwrapped_type(CGContext *cg, Node *operand_type) {
     return NULL;
 }
 
-static void emit_match_condition(COut *o, CGContext *cg, Node *subject, const char *pattern) {
+static void emit_try_expr(COut *o, CGContext *cg, Node *try_expr) {
+    Node *operand = try_expr->as.unary.operand;
+    Node *operand_type = infer_expr_type(cg, operand);
+    Node *inner_type = try_unwrapped_type(cg, operand_type);
+    char temp_name[64];
+
+    make_try_temp_name(cg, temp_name, sizeof(temp_name));
+    emit(o, "({ ");
+    emit_typed_name(o, operand_type, temp_name);
+    emit(o, " = ");
+    emit_expr(o, cg, operand);
+    emit(o, "; ");
+    if (operand_type && operand_type->kind == NODE_TYPE_NAMED &&
+        type_name_has_form(operand_type->as.type_named.name, "Option")) {
+        emit(o, "if (!%s.is_some) { ", temp_name);
+    } else {
+        emit(o, "if (!%s.is_ok) { ", temp_name);
+    }
+    emit_try_propagation_failure(o, cg, operand_type, temp_name);
+    emit(o, "} %s.%s; })",
+         temp_name,
+         operand_type && operand_type->kind == NODE_TYPE_NAMED &&
+         type_name_has_form(operand_type->as.type_named.name, "Option")
+             ? "value"
+             : "as.ok");
+    (void)inner_type;
+}
+
+static void emit_string_as_view(COut *o, CGContext *cg, Node *object) {
+    Node *object_type = infer_expr_type(cg, object);
+
+    emit(o, "((NStr){ .ptr = (const uint8_t*)");
+    emit_expr(o, cg, object);
+    if (object_type && object_type->kind == NODE_TYPE_POINTER)
+        emit(o, "->ptr, .len = ");
+    else
+        emit(o, ".ptr, .len = ");
+    emit_expr(o, cg, object);
+    if (object_type && object_type->kind == NODE_TYPE_POINTER)
+        emit(o, "->len })");
+    else
+        emit(o, ".len })");
+}
+
+static void emit_string_from_expr(COut *o, CGContext *cg, Node *arg) {
+    char src_name[64];
+    char out_name[64];
+
+    make_try_temp_name(cg, src_name, sizeof(src_name));
+    make_try_temp_name(cg, out_name, sizeof(out_name));
+
+    emit(o, "({ ");
+    emit(o, "NStr %s = ", src_name);
+    emit_expr_typed(o, cg, arg, cg_temp_type_named(cg, "str"));
+    emit(o, "; ");
+    emit(o, "NString %s; ", out_name);
+    emit(o, "%s.len = %s.len; ", out_name, src_name);
+    emit(o, "%s.cap = %s.len; ", out_name, src_name);
+    emit(o, "%s.ptr = (uint8_t*)malloc(%s.len + 1); ", out_name, src_name);
+    emit(o, "if (%s.ptr) { memcpy(%s.ptr, %s.ptr, %s.len); %s.ptr[%s.len] = 0; } ",
+         out_name, out_name, src_name, src_name, out_name, src_name);
+    emit(o, "%s; })", out_name);
+}
+
+static void emit_string_free_expr(COut *o, CGContext *cg, Node *object) {
+    Node *object_type = infer_expr_type(cg, object);
+    char ptr_name[64];
+
+    make_try_temp_name(cg, ptr_name, sizeof(ptr_name));
+    emit(o, "({ NString *%s = ", ptr_name);
+    if (object_type && object_type->kind == NODE_TYPE_POINTER) {
+        emit_expr(o, cg, object);
+    } else {
+        emit(o, "&(");
+        emit_expr(o, cg, object);
+        emit(o, ")");
+    }
+    emit(o, "; if (%s->ptr) free(%s->ptr); %s->ptr = NULL; %s->len = 0; %s->cap = 0; })",
+         ptr_name, ptr_name, ptr_name, ptr_name, ptr_name);
+}
+
+static void emit_slice_expr(COut *o, CGContext *cg, Node *slice_expr) {
+    Node *object = slice_expr->as.slice_expr.object;
+    Node *object_type = infer_expr_type(cg, object);
+    char obj_name[64];
+    char start_name[64];
+    char end_name[64];
+
+    make_try_temp_name(cg, obj_name, sizeof(obj_name));
+    make_try_temp_name(cg, start_name, sizeof(start_name));
+    make_try_temp_name(cg, end_name, sizeof(end_name));
+
+    emit(o, "({ ");
+    if (object_type && object_type->kind == NODE_TYPE_ARRAY) {
+        Node *result_type = cg_temp_type_array(cg, object_type->as.type_array.elem, -1);
+        char slice_name[256];
+
+        format_slice_type_name(result_type, slice_name, sizeof(slice_name));
+        if (object_type->as.type_array.length < 0) {
+            emit_type_left(o, result_type);
+            emit(o, " %s = ", obj_name);
+            emit_expr(o, cg, object);
+            emit(o, "; ");
+            emit(o, "size_t %s = ", start_name);
+            if (slice_expr->as.slice_expr.start)
+                emit_expr(o, cg, slice_expr->as.slice_expr.start);
+            else
+                emit(o, "0");
+            emit(o, "; ");
+            emit(o, "size_t %s = ", end_name);
+            if (slice_expr->as.slice_expr.end)
+                emit_expr(o, cg, slice_expr->as.slice_expr.end);
+            else
+                emit(o, "%s.len", obj_name);
+            emit(o, "; ");
+            emit(o, "((%s){ .ptr = %s.ptr + %s, .len = %s - %s }); })",
+                 slice_name, obj_name, start_name, end_name, start_name);
+        } else {
+            emit(o, "size_t %s = ", start_name);
+            if (slice_expr->as.slice_expr.start)
+                emit_expr(o, cg, slice_expr->as.slice_expr.start);
+            else
+                emit(o, "0");
+            emit(o, "; ");
+            emit(o, "size_t %s = ", end_name);
+            if (slice_expr->as.slice_expr.end)
+                emit_expr(o, cg, slice_expr->as.slice_expr.end);
+            else
+                emit(o, "%d", object_type->as.type_array.length);
+            emit(o, "; ");
+            emit(o, "((%s){ .ptr = ", slice_name);
+            emit_expr(o, cg, object);
+            emit(o, " + %s, .len = %s - %s }); })", start_name, end_name, start_name);
+        }
+        return;
+    }
+
+    if (object_type && object_type->kind == NODE_TYPE_NAMED &&
+        !strcmp(object_type->as.type_named.name, "String")) {
+        emit(o, "NString %s = ", obj_name);
+        emit_expr(o, cg, object);
+        emit(o, "; ");
+        emit(o, "size_t %s = ", start_name);
+        if (slice_expr->as.slice_expr.start)
+            emit_expr(o, cg, slice_expr->as.slice_expr.start);
+        else
+            emit(o, "0");
+        emit(o, "; ");
+        emit(o, "size_t %s = ", end_name);
+        if (slice_expr->as.slice_expr.end)
+            emit_expr(o, cg, slice_expr->as.slice_expr.end);
+        else
+            emit(o, "%s.len", obj_name);
+        emit(o, "; ");
+        emit(o, "((NStr){ .ptr = (const uint8_t*)(%s.ptr + %s), .len = %s - %s }); })",
+             obj_name, start_name, end_name, start_name);
+        return;
+    }
+
+    emit(o, "NStr %s = ", obj_name);
+    emit_expr_typed(o, cg, object, cg_temp_type_named(cg, "str"));
+    emit(o, "; ");
+    emit(o, "size_t %s = ", start_name);
+    if (slice_expr->as.slice_expr.start)
+        emit_expr(o, cg, slice_expr->as.slice_expr.start);
+    else
+        emit(o, "0");
+    emit(o, "; ");
+    emit(o, "size_t %s = ", end_name);
+    if (slice_expr->as.slice_expr.end)
+        emit_expr(o, cg, slice_expr->as.slice_expr.end);
+    else
+        emit(o, "%s.len", obj_name);
+    emit(o, "; ");
+    emit(o, "((NStr){ .ptr = %s.ptr + %s, .len = %s - %s }); })",
+         obj_name, start_name, end_name, start_name);
+}
+
+static void emit_match_condition_name(COut *o, CGContext *cg, const char *subject_name,
+                                      Node *subject_type, const char *pattern) {
     const char *dot = strchr(pattern, '.');
 
+    (void)cg;
+    (void)subject_type;
+
     if (!strcmp(pattern, "Some")) {
-        emit_expr(o, cg, subject);
-        emit(o, ".is_some");
+        emit(o, "%s.is_some", subject_name);
         return;
     }
 
     if (!strcmp(pattern, "None")) {
-        emit(o, "!(");
-        emit_expr(o, cg, subject);
-        emit(o, ".is_some)");
+        emit(o, "!%s.is_some", subject_name);
         return;
     }
 
     if (!strcmp(pattern, "Ok")) {
-        emit_expr(o, cg, subject);
-        emit(o, ".is_ok");
+        emit(o, "%s.is_ok", subject_name);
         return;
     }
 
     if (!strcmp(pattern, "Err")) {
-        emit(o, "!(");
-        emit_expr(o, cg, subject);
-        emit(o, ".is_ok)");
+        emit(o, "!%s.is_ok", subject_name);
         return;
     }
 
@@ -1161,50 +1431,170 @@ static void emit_match_condition(COut *o, CGContext *cg, Node *subject, const ch
         return;
     }
 
-    char enum_name[128];
-    int elen = (int)(dot - pattern);
-    if (elen >= 127) elen = 127;
-    memcpy(enum_name, pattern, (size_t)elen);
-    enum_name[elen] = '\0';
+    {
+        char enum_name[128];
+        int elen = (int)(dot - pattern);
+        Node *decl;
+        int is_data;
 
-    Node *decl = find_decl_named(cg->program, NODE_ENUM_DECL, enum_name);
-    int is_data = decl && enum_is_data_carrying(decl);
+        if (elen >= 127)
+            elen = 127;
+        memcpy(enum_name, pattern, (size_t)elen);
+        enum_name[elen] = '\0';
 
-    emit_expr(o, cg, subject);
-    if (is_data)
-        emit(o, ".tag == %s_%s", enum_name, dot + 1);
-    else
-        emit(o, " == %s_%s", enum_name, dot + 1);
+        decl = find_decl_named(cg->program, NODE_ENUM_DECL, enum_name);
+        is_data = decl && enum_is_data_carrying(decl);
+        if (is_data)
+            emit(o, "%s.tag == %s_%s", subject_name, enum_name, dot + 1);
+        else
+            emit(o, "%s == %s_%s", subject_name, enum_name, dot + 1);
+    }
 }
 
-static void emit_match_expr(COut *o, CGContext *cg, Node *match) {
-    int emitted_fallback = 0;
+static Node *infer_match_arm_type(CGContext *cg, Node *match, int arm_index) {
+    Node *subject_type;
+    Node **binding_types = NULL;
+    int binding_count = 0;
+    int declared_binding_count;
+    Node *result;
+
+    if (!match || arm_index < 0 || arm_index >= match->as.match.count)
+        return NULL;
+
+    subject_type = infer_expr_type(cg, match->as.match.subject);
+    if (!subject_type)
+        return NULL;
+
+    if (!get_match_binding_type_nodes(cg, subject_type, match->as.match.patterns[arm_index],
+                                      &binding_types, &binding_count)) {
+        return infer_expr_type(cg, match->as.match.values[arm_index]);
+    }
+
+    declared_binding_count = match->as.match.binding_counts[arm_index];
+    if (declared_binding_count > 0) {
+        cg_push_scope(cg);
+        for (int i = 0; i < declared_binding_count; i++)
+            cg_define(cg, match->as.match.binding_names[arm_index][i], binding_types[i]);
+    }
+    result = infer_expr_type(cg, match->as.match.values[arm_index]);
+    if (declared_binding_count > 0)
+        cg_pop_scope(cg);
+    free(binding_types);
+    return result;
+}
+
+static void emit_match_binding_value(COut *o, CGContext *cg, const char *subject_name,
+                                     Node *subject_type, const char *pattern,
+                                     int binding_index) {
+    if (!subject_type || subject_type->kind != NODE_TYPE_NAMED)
+        return;
+
+    if (type_name_has_form(subject_type->as.type_named.name, "Option")) {
+        emit(o, "%s.value", subject_name);
+        return;
+    }
+
+    if (type_name_has_form(subject_type->as.type_named.name, "Result")) {
+        if (!strcmp(pattern, "Ok"))
+            emit(o, "%s.as.ok", subject_name);
+        else
+            emit(o, "%s.as.err", subject_name);
+        return;
+    }
+
+    {
+        const char *dot = strchr(pattern, '.');
+        NodeList *fields = NULL;
+        char enum_name[128];
+        const char *variant_name;
+
+        if (!dot)
+            return;
+        memcpy(enum_name, pattern, (size_t)(dot - pattern));
+        enum_name[dot - pattern] = '\0';
+        variant_name = dot + 1;
+        if (!find_enum_variant_decl(cg, enum_name, variant_name, &fields) || !fields ||
+            binding_index < 0 || binding_index >= fields->count) {
+            return;
+        }
+        emit(o, "%s.as.%s.%s", subject_name, variant_name, fields->items[binding_index]->as.let.name);
+    }
+}
+
+static void emit_match_expr(COut *o, CGContext *cg, Node *match, Node *expected_type) {
+    Node *subject_type;
+    Node *result_type;
+    char subject_name[64];
+    char result_name[64];
 
     if (match->as.match.count == 0) {
         emit(o, "0");
         return;
     }
 
-    emit(o, "(");
+    subject_type = infer_expr_type(cg, match->as.match.subject);
+    result_type = expected_type ? expected_type : infer_match_arm_type(cg, match, 0);
+    make_try_temp_name(cg, subject_name, sizeof(subject_name));
+    make_try_temp_name(cg, result_name, sizeof(result_name));
+
+    emit(o, "({\n");
+    o->indent++;
+    emit_indent(o);
+    emit_typed_name(o, subject_type, subject_name);
+    emit(o, " = ");
+    emit_expr(o, cg, match->as.match.subject);
+    emit(o, ";\n");
+    emit_indent(o);
+    emit_typed_name(o, result_type ? result_type : cg_temp_type_named(cg, "i32"), result_name);
+    emit(o, " = {0};\n");
+
     for (int i = 0; i < match->as.match.count; i++) {
         const char *pattern = match->as.match.patterns[i];
+        Node **binding_types = NULL;
+        int binding_count = 0;
+        int declared_binding_count = match->as.match.binding_counts[i];
 
+        emit_indent(o);
         if (!strcmp(pattern, "_")) {
-            emit_expr(o, cg, match->as.match.values[i]);
-            emitted_fallback = 1;
-            break;
+            if (i == 0) emit(o, "{\n");
+            else emit(o, "else {\n");
+        } else {
+            if (i == 0) emit(o, "if (");
+            else emit(o, "else if (");
+            emit_match_condition_name(o, cg, subject_name, subject_type, pattern);
+            emit(o, ") {\n");
         }
 
-        emit_match_condition(o, cg, match->as.match.subject, pattern);
-        emit(o, " ? ");
-        emit_expr(o, cg, match->as.match.values[i]);
-        emit(o, " : ");
+        o->indent++;
+        if (get_match_binding_type_nodes(cg, subject_type, pattern, &binding_types, &binding_count) &&
+            declared_binding_count > 0) {
+            cg_push_scope(cg);
+            for (int j = 0; j < declared_binding_count; j++) {
+                emit_indent(o);
+                emit_typed_name(o, binding_types[j], match->as.match.binding_names[i][j]);
+                emit(o, " = ");
+                emit_match_binding_value(o, cg, subject_name, subject_type, pattern, j);
+                emit(o, ";\n");
+                cg_define(cg, match->as.match.binding_names[i][j], binding_types[j]);
+            }
+        }
+        emit_indent(o);
+        emit(o, "%s = ", result_name);
+        emit_expr_typed(o, cg, match->as.match.values[i], result_type);
+        emit(o, ";\n");
+        if (declared_binding_count > 0)
+            cg_pop_scope(cg);
+        free(binding_types);
+        o->indent--;
+        emit_indent(o);
+        emit(o, "}\n");
     }
 
-    if (!emitted_fallback)
-        emit(o, "0");
-
-    emit(o, ")");
+    emit_indent(o);
+    emit(o, "%s;\n", result_name);
+    o->indent--;
+    emit_indent(o);
+    emit(o, "})");
 }
 
 static int is_enum_variant_constructor_call(CGContext *cg, Node *call, Node **out_enum_decl, NodeList **out_fields) {
@@ -1303,6 +1693,38 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
             if (resolve_call_return_type(cg, expr) == NULL) {
                 Node *enum_decl = NULL;
                 NodeList *fields = NULL;
+                Node *callee = expr->as.call.callee;
+
+                if (callee && callee->kind == NODE_FIELD &&
+                    callee->as.field.object &&
+                    callee->as.field.object->kind == NODE_IDENT &&
+                    !strcmp(callee->as.field.object->as.ident.name, "String") &&
+                    !strcmp(callee->as.field.field, "from")) {
+                    return cg_temp_type_named(cg, "String");
+                }
+
+                if (callee && callee->kind == NODE_FIELD) {
+                    Node *object = callee->as.field.object;
+                    Node *object_type = infer_expr_type(cg, object);
+
+                    if (object_type && object_type->kind == NODE_TYPE_NAMED &&
+                        !strcmp(object_type->as.type_named.name, "String")) {
+                        if (!strcmp(callee->as.field.field, "as_str"))
+                            return cg_temp_type_named(cg, "str");
+                        if (!strcmp(callee->as.field.field, "free"))
+                            return cg_temp_type_named(cg, "void");
+                    }
+
+                    if (object_type && object_type->kind == NODE_TYPE_POINTER &&
+                        object_type->as.type_ptr.inner &&
+                        object_type->as.type_ptr.inner->kind == NODE_TYPE_NAMED &&
+                        !strcmp(object_type->as.type_ptr.inner->as.type_named.name, "String")) {
+                        if (!strcmp(callee->as.field.field, "as_str"))
+                            return cg_temp_type_named(cg, "str");
+                        if (!strcmp(callee->as.field.field, "free"))
+                            return cg_temp_type_named(cg, "void");
+                    }
+                }
 
                 if (is_enum_variant_constructor_call(cg, expr, &enum_decl, &fields))
                     return cg_temp_type_named(cg, enum_decl->as.enum_decl.name);
@@ -1327,6 +1749,26 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
                 return NULL;
             }
 
+            if (object_type->kind == NODE_TYPE_NAMED &&
+                !strcmp(object_type->as.type_named.name, "str")) {
+                if (!strcmp(expr->as.field.field, "len"))
+                    return cg_temp_type_named(cg, "usize");
+                if (!strcmp(expr->as.field.field, "ptr"))
+                    return cg_temp_type_pointer(cg, cg_temp_type_named(cg, "u8"), 1);
+                return NULL;
+            }
+
+            if (object_type->kind == NODE_TYPE_NAMED &&
+                !strcmp(object_type->as.type_named.name, "String")) {
+                if (!strcmp(expr->as.field.field, "len"))
+                    return cg_temp_type_named(cg, "usize");
+                if (!strcmp(expr->as.field.field, "cap"))
+                    return cg_temp_type_named(cg, "usize");
+                if (!strcmp(expr->as.field.field, "ptr"))
+                    return cg_temp_type_pointer(cg, cg_temp_type_named(cg, "u8"), 0);
+                return NULL;
+            }
+
             const char *owner_name = type_named_name(object_type);
             if (!owner_name && object_type->kind == NODE_TYPE_POINTER)
                 owner_name = type_named_name(object_type->as.type_ptr.inner);
@@ -1335,7 +1777,7 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
         }
         case NODE_MATCH:
             if (expr->as.match.count > 0)
-                return infer_expr_type(cg, expr->as.match.values[0]);
+                return infer_match_arm_type(cg, expr, 0);
             return NULL;
         case NODE_INDEX: {
             Node *obj_type = infer_expr_type(cg, expr->as.index_expr.object);
@@ -1344,6 +1786,27 @@ static Node *infer_expr_type(CGContext *cg, Node *expr) {
                 return obj_type->as.type_array.elem;
             if (obj_type->kind == NODE_TYPE_POINTER)
                 return obj_type->as.type_ptr.inner;
+            if (obj_type->kind == NODE_TYPE_NAMED &&
+                !strcmp(obj_type->as.type_named.name, "str")) {
+                return cg_temp_type_named(cg, "u8");
+            }
+            if (obj_type->kind == NODE_TYPE_NAMED &&
+                !strcmp(obj_type->as.type_named.name, "String")) {
+                return cg_temp_type_named(cg, "u8");
+            }
+            return NULL;
+        }
+        case NODE_SLICE: {
+            Node *obj_type = infer_expr_type(cg, expr->as.slice_expr.object);
+            if (!obj_type)
+                return NULL;
+            if (obj_type->kind == NODE_TYPE_ARRAY)
+                return cg_temp_type_array(cg, obj_type->as.type_array.elem, -1);
+            if (obj_type->kind == NODE_TYPE_NAMED &&
+                (!strcmp(obj_type->as.type_named.name, "str") ||
+                 !strcmp(obj_type->as.type_named.name, "String"))) {
+                return cg_temp_type_named(cg, "str");
+            }
             return NULL;
         }
         default:
@@ -1477,7 +1940,14 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             emit(o, "%g", n->as.lit_float.value);
             break;
         case NODE_LIT_STRING:
-            emit(o, "\"%s\"", n->as.lit_str.value);
+            if (expected_type && expected_type->kind == NODE_TYPE_NAMED &&
+                !strcmp(expected_type->as.type_named.name, "str")) {
+                emit(o, "((NStr){ .ptr = (const uint8_t*)\"");
+                emit(o, "%s", n->as.lit_str.value);
+                emit(o, "\", .len = %zu })", strlen(n->as.lit_str.value));
+            } else {
+                emit(o, "\"%s\"", n->as.lit_str.value);
+            }
             break;
         case NODE_LIT_BOOL:
             emit(o, "%s", n->as.lit_int.value ? "true" : "false");
@@ -1497,10 +1967,17 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             break;
         case NODE_UNARY:
             if (!strcmp(n->as.unary.op, "?")) {
-                emit(o, "/*try?*/0");
+                emit_try_expr(o, cg, n);
                 break;
             }
-            /* dereference: *ptr → (*ptr) */
+            /* bitwise NOT: ~x */
+            if (!strcmp(n->as.unary.op, "~")) {
+                emit(o, "(~");
+                emit_expr(o, cg, n->as.unary.operand);
+                emit(o, ")");
+                break;
+            }
+            /* all other prefix unary ops */
             emit(o, "(%s", n->as.unary.op);
             emit_expr(o, cg, n->as.unary.operand);
             emit(o, ")");
@@ -1514,6 +1991,41 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             Node *enum_decl = NULL;
             NodeList *fields = NULL;
             MethodResolution method = resolve_method_call(cg, n);
+            if (n->as.call.callee &&
+                n->as.call.callee->kind == NODE_FIELD &&
+                n->as.call.callee->as.field.object &&
+                n->as.call.callee->as.field.object->kind == NODE_IDENT &&
+                !strcmp(n->as.call.callee->as.field.object->as.ident.name, "String") &&
+                !strcmp(n->as.call.callee->as.field.field, "from") &&
+                n->as.call.args.count == 1) {
+                emit_string_from_expr(o, cg, n->as.call.args.items[0]);
+                break;
+            }
+            if (n->as.call.callee && n->as.call.callee->kind == NODE_FIELD) {
+                Node *object = n->as.call.callee->as.field.object;
+                Node *object_type = infer_expr_type(cg, object);
+                int is_string_receiver = object_type &&
+                    ((object_type->kind == NODE_TYPE_NAMED &&
+                      !strcmp(object_type->as.type_named.name, "String")) ||
+                     (object_type->kind == NODE_TYPE_POINTER &&
+                      object_type->as.type_ptr.inner &&
+                      object_type->as.type_ptr.inner->kind == NODE_TYPE_NAMED &&
+                      !strcmp(object_type->as.type_ptr.inner->as.type_named.name, "String")));
+
+                if (is_string_receiver &&
+                    !strcmp(n->as.call.callee->as.field.field, "as_str") &&
+                    n->as.call.args.count == 0) {
+                    emit_string_as_view(o, cg, object);
+                    break;
+                }
+
+                if (is_string_receiver &&
+                    !strcmp(n->as.call.callee->as.field.field, "free") &&
+                    n->as.call.args.count == 0) {
+                    emit_string_free_expr(o, cg, object);
+                    break;
+                }
+            }
             if (is_enum_variant_constructor_call(cg, n, &enum_decl, &fields)) {
                 const char *enum_name = enum_decl->as.enum_decl.name;
                 const char *variant_name = n->as.call.callee->as.field.field;
@@ -1616,6 +2128,18 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
                 emit(o, ".ptr[");
                 emit_expr(o, cg, n->as.index_expr.index);
                 emit(o, "]");
+            } else if (obj_type && obj_type->kind == NODE_TYPE_NAMED &&
+                       !strcmp(obj_type->as.type_named.name, "str")) {
+                emit_expr(o, cg, n->as.index_expr.object);
+                emit(o, ".ptr[");
+                emit_expr(o, cg, n->as.index_expr.index);
+                emit(o, "]");
+            } else if (obj_type && obj_type->kind == NODE_TYPE_NAMED &&
+                       !strcmp(obj_type->as.type_named.name, "String")) {
+                emit_expr(o, cg, n->as.index_expr.object);
+                emit(o, ".ptr[");
+                emit_expr(o, cg, n->as.index_expr.index);
+                emit(o, "]");
             } else {
                 emit_expr(o, cg, n->as.index_expr.object);
                 emit(o, "[");
@@ -1624,6 +2148,9 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             }
             break;
         }
+        case NODE_SLICE:
+            emit_slice_expr(o, cg, n);
+            break;
         case NODE_STRUCT_LIT: {
             emit(o, "(%s){", n->as.struct_lit.type_name);
             for (int i = 0; i < n->as.struct_lit.count; i++) {
@@ -1635,7 +2162,7 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             break;
         }
         case NODE_MATCH: {
-            emit_match_expr(o, cg, n);
+            emit_match_expr(o, cg, n, expected_type);
             break;
         }
         default:
@@ -2026,6 +2553,8 @@ static void emit_standard_headers(COut *o, Node *prog) {
     (void)need_stdbool;
     (void)need_stddef;
     (void)need_stdint;
+    (void)need_stdlib;
+    (void)need_string;
 
     for (int i = 0; i < prog->as.program.decls.count; i++) {
         Node *decl = prog->as.program.decls.items[i];
@@ -2045,8 +2574,8 @@ static void emit_standard_headers(COut *o, Node *prog) {
     emit(o, "#include <stddef.h>\n");
     emit(o, "#include <stdint.h>\n");
     if (need_stdio) emit(o, "#include <stdio.h>\n");
-    if (need_stdlib) emit(o, "#include <stdlib.h>\n");
-    if (need_string) emit(o, "#include <string.h>\n");
+    emit(o, "#include <stdlib.h>\n");
+    emit(o, "#include <string.h>\n");
     emit(o, "\n");
 }
 
@@ -2077,6 +2606,17 @@ static void emit_type_definitions(COut *o, Node *prog) {
 
     if (emitted_forward)
         emit(o, "\n");
+
+    emit(o, "typedef struct NStr {\n");
+    emit(o, "    const uint8_t *ptr;\n");
+    emit(o, "    size_t len;\n");
+    emit(o, "} NStr;\n\n");
+
+    emit(o, "typedef struct NString {\n");
+    emit(o, "    uint8_t *ptr;\n");
+    emit(o, "    size_t len;\n");
+    emit(o, "    size_t cap;\n");
+    emit(o, "} NString;\n\n");
 
     for (int i = 0; i < prog->as.program.decls.count; i++) {
         Node *d = prog->as.program.decls.items[i];
@@ -2304,6 +2844,243 @@ static void emit_definitions(COut *o, Node *prog) {
     free(cg.loop_defer_markers.items);
 }
 
+/* ── UI code generation ────────────────────────────────────────────────── */
+
+static int has_ui_app(Node *prog) {
+    for (int i = 0; i < prog->as.program.decls.count; i++)
+        if (prog->as.program.decls.items[i]->kind == NODE_UI_APP)
+            return 1;
+    return 0;
+}
+
+static long long ui_prop_int(Node *elem, const char *name, long long def) {
+    for (int i = 0; i < elem->as.ui_element.properties.count; i++) {
+        Node *p = elem->as.ui_element.properties.items[i];
+        if (!strcmp(p->as.ui_property.name, name) &&
+            p->as.ui_property.value &&
+            p->as.ui_property.value->kind == NODE_LIT_INT)
+            return p->as.ui_property.value->as.lit_int.value;
+    }
+    return def;
+}
+
+static const char *ui_elem_text(Node *elem) {
+    if (elem->as.ui_element.text)
+        return elem->as.ui_element.text;
+    for (int i = 0; i < elem->as.ui_element.properties.count; i++) {
+        Node *p = elem->as.ui_element.properties.items[i];
+        if (p->as.ui_property.value &&
+            p->as.ui_property.value->kind == NODE_LIT_STRING &&
+            (!strcmp(p->as.ui_property.name, "text") ||
+             !strcmp(p->as.ui_property.name, "title") ||
+             !strcmp(p->as.ui_property.name, "label")))
+            return p->as.ui_property.value->as.lit_str.value;
+    }
+    return "";
+}
+
+/* Emit handler body as a static function */
+static int emit_ui_handlers(COut *o, Node *elem, Node *prog, int *counter) {
+    for (int i = 0; i < elem->as.ui_element.handlers.count; i++) {
+        CGContext cg;
+        memset(&cg, 0, sizeof(cg));
+        cg.program = prog;
+
+        Node *h = elem->as.ui_element.handlers.items[i];
+        int hkind = h->as.ui_handler.handler_kind;
+        const char *hname = (hkind == UI_HANDLER_CLICK)  ? "onclick"   :
+                            (hkind == UI_HANDLER_KEY)    ? "onkey"     : "onchange";
+        emit(o, "static void ns_handler_%d_%s(void) ", *counter, hname);
+        cg_push_scope(&cg);
+        emit_block(o, &cg, h->as.ui_handler.body);
+        cg_pop_scope(&cg);
+        emit(o, "\n");
+
+        cg_free_temps(&cg);
+        free(cg.defers);
+        free(cg.scope_defer_markers.items);
+        free(cg.loop_defer_markers.items);
+    }
+    (*counter)++;
+
+    for (int i = 0; i < elem->as.ui_element.children.count; i++)
+        emit_ui_handlers(o, elem->as.ui_element.children.items[i], prog, counter);
+    return *counter;
+}
+
+typedef struct UIElemInfo {
+    int   kind;           /* UIElemKind */
+    int   x, y, w, h;
+    const char *text;
+    int   elem_idx;       /* sequential index of this element among all elements */
+    int   has_onclick;
+    int   has_onkey;
+    int   has_onchange;
+} UIElemInfo;
+
+static void collect_ui_elems(Node *elem, int *x_cur, int *y_cur, int *idx,
+                              UIElemInfo *elems, int *count, int max) {
+    if (*count >= max) return;
+    int ek = elem->as.ui_element.elem_kind;
+
+    if (ek != UI_ELEM_WINDOW) {
+        int def_w = (ek == UI_ELEM_BUTTON) ? 160 :
+                    (ek == UI_ELEM_LABEL)  ? 220 :
+                    (ek == UI_ELEM_INPUT)  ? 200 : 160;
+        int def_h = (ek == UI_ELEM_BUTTON) ? 40  :
+                    (ek == UI_ELEM_LABEL)  ? 28  :
+                    (ek == UI_ELEM_INPUT)  ? 36  : 40;
+
+        UIElemInfo *info = &elems[*count];
+        info->kind     = ek;
+        info->x        = (int)ui_prop_int(elem, "x", *x_cur);
+        info->y        = (int)ui_prop_int(elem, "y", *y_cur);
+        info->w        = (int)ui_prop_int(elem, "width", def_w);
+        info->h        = (int)ui_prop_int(elem, "height", def_h);
+        info->text     = ui_elem_text(elem);
+        info->elem_idx = *idx;
+        info->has_onclick  = 0;
+        info->has_onkey    = 0;
+        info->has_onchange = 0;
+
+        for (int i = 0; i < elem->as.ui_element.handlers.count; i++) {
+            int hk = elem->as.ui_element.handlers.items[i]->as.ui_handler.handler_kind;
+            if (hk == UI_HANDLER_CLICK)  info->has_onclick  = 1;
+            if (hk == UI_HANDLER_KEY)    info->has_onkey    = 1;
+            if (hk == UI_HANDLER_CHANGE) info->has_onchange = 1;
+        }
+
+        *y_cur += info->h + 8;
+        (*count)++;
+    }
+    (*idx)++;
+
+    for (int i = 0; i < elem->as.ui_element.children.count; i++)
+        collect_ui_elems(elem->as.ui_element.children.items[i],
+                         x_cur, y_cur, idx, elems, count, max);
+}
+
+static void emit_ui_app(COut *o, Node *prog) {
+    Node *app = NULL;
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        if (prog->as.program.decls.items[i]->kind == NODE_UI_APP) {
+            app = prog->as.program.decls.items[i];
+            break;
+        }
+    }
+    if (!app) return;
+
+    /* find the window element (first child of app) */
+    Node *window = NULL;
+    for (int i = 0; i < app->as.ui_app.children.count; i++) {
+        Node *ch = app->as.ui_app.children.items[i];
+        if (ch->kind == NODE_UI_ELEMENT && ch->as.ui_element.elem_kind == UI_ELEM_WINDOW) {
+            window = ch;
+            break;
+        }
+    }
+
+    const char *title  = app->as.ui_app.name;
+    int win_w = 800, win_h = 600;
+    if (window) {
+        title  = ui_elem_text(window)[0] ? ui_elem_text(window) : title;
+        win_w  = (int)ui_prop_int(window, "width",  800);
+        win_h  = (int)ui_prop_int(window, "height", 600);
+    }
+
+    emit(o, "\n/* ── NightScript SDL2 UI runtime ──────────────────────── */\n");
+
+    /* emit all handler bodies */
+    int handler_counter = 0;
+    if (window)
+        emit_ui_handlers(o, window, prog, &handler_counter);
+
+    /* collect element info */
+    UIElemInfo elems[256];
+    int elem_count = 0;
+    int x_cur = 10, y_cur = 10, idx = 0;
+    if (window)
+        collect_ui_elems(window, &x_cur, &y_cur, &idx, elems, &elem_count, 256);
+
+    /* emit element table */
+    emit(o, "\ntypedef struct { int x,y,w,h; const char *label; "
+         "void(*on_click)(void); void(*on_key)(void); } NSUIElem;\n");
+
+    emit(o, "static NSUIElem ns_ui_elems[] = {\n");
+    for (int i = 0; i < elem_count; i++) {
+        UIElemInfo *e = &elems[i];
+        const char *onclick_fn  = e->has_onclick  ? "NULL" : "NULL";
+        const char *onkey_fn    = e->has_onkey    ? "NULL" : "NULL";
+
+        /* rebuild handler name: idx × handlers + offset */
+        char onclick_buf[64] = "NULL";
+        char onkey_buf[64]   = "NULL";
+        if (e->has_onclick)
+            snprintf(onclick_buf, sizeof(onclick_buf), "ns_handler_%d_onclick", e->elem_idx);
+        if (e->has_onkey)
+            snprintf(onkey_buf, sizeof(onkey_buf), "ns_handler_%d_onkey", e->elem_idx);
+        (void)onclick_fn; (void)onkey_fn;
+
+        emit(o, "    { %d, %d, %d, %d, \"%s\", %s, %s },\n",
+             e->x, e->y, e->w, e->h, e->text, onclick_buf, onkey_buf);
+    }
+    emit(o, "};\n");
+    emit(o, "#define NS_UI_ELEM_COUNT ((int)(sizeof(ns_ui_elems)/sizeof(ns_ui_elems[0])))\n\n");
+
+    /* emit main() */
+    emit(o, "int main(void) {\n");
+    emit(o, "    if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;\n");
+    emit(o, "    SDL_Window *ns_win = SDL_CreateWindow(\"%s\",\n", title);
+    emit(o, "        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,\n");
+    emit(o, "        %d, %d, SDL_WINDOW_SHOWN);\n", win_w, win_h);
+    emit(o, "    if (!ns_win) { SDL_Quit(); return 1; }\n");
+    emit(o, "    SDL_Renderer *ns_rend = SDL_CreateRenderer(ns_win, -1,\n");
+    emit(o, "        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);\n");
+    emit(o, "    if (!ns_rend) { SDL_DestroyWindow(ns_win); SDL_Quit(); return 1; }\n");
+    emit(o, "\n");
+    emit(o, "    int ns_running = 1;\n");
+    emit(o, "    while (ns_running) {\n");
+    emit(o, "        SDL_Event ns_ev;\n");
+    emit(o, "        while (SDL_PollEvent(&ns_ev)) {\n");
+    emit(o, "            if (ns_ev.type == SDL_QUIT) ns_running = 0;\n");
+    emit(o, "            if (ns_ev.type == SDL_MOUSEBUTTONDOWN &&\n");
+    emit(o, "                ns_ev.button.button == SDL_BUTTON_LEFT) {\n");
+    emit(o, "                int mx = ns_ev.button.x, my = ns_ev.button.y;\n");
+    emit(o, "                for (int i = 0; i < NS_UI_ELEM_COUNT; i++) {\n");
+    emit(o, "                    NSUIElem *e = &ns_ui_elems[i];\n");
+    emit(o, "                    if (mx >= e->x && mx < e->x+e->w &&\n");
+    emit(o, "                        my >= e->y && my < e->y+e->h && e->on_click)\n");
+    emit(o, "                        e->on_click();\n");
+    emit(o, "                }\n");
+    emit(o, "            }\n");
+    emit(o, "            if (ns_ev.type == SDL_KEYDOWN) {\n");
+    emit(o, "                for (int i = 0; i < NS_UI_ELEM_COUNT; i++)\n");
+    emit(o, "                    if (ns_ui_elems[i].on_key) ns_ui_elems[i].on_key();\n");
+    emit(o, "            }\n");
+    emit(o, "        }\n");
+    emit(o, "        SDL_SetRenderDrawColor(ns_rend, 30, 30, 30, 255);\n");
+    emit(o, "        SDL_RenderClear(ns_rend);\n");
+    emit(o, "        for (int i = 0; i < NS_UI_ELEM_COUNT; i++) {\n");
+    emit(o, "            NSUIElem *e = &ns_ui_elems[i];\n");
+    emit(o, "            SDL_Rect r = { e->x, e->y, e->w, e->h };\n");
+    emit(o, "            if (e->on_click)\n");
+    emit(o, "                SDL_SetRenderDrawColor(ns_rend, 70, 100, 220, 255);\n");
+    emit(o, "            else\n");
+    emit(o, "                SDL_SetRenderDrawColor(ns_rend, 180, 180, 180, 255);\n");
+    emit(o, "            SDL_RenderFillRect(ns_rend, &r);\n");
+    emit(o, "            SDL_SetRenderDrawColor(ns_rend, 50, 50, 50, 255);\n");
+    emit(o, "            SDL_RenderDrawRect(ns_rend, &r);\n");
+    emit(o, "        }\n");
+    emit(o, "        SDL_RenderPresent(ns_rend);\n");
+    emit(o, "        SDL_Delay(16);\n");
+    emit(o, "    }\n");
+    emit(o, "    SDL_DestroyRenderer(ns_rend);\n");
+    emit(o, "    SDL_DestroyWindow(ns_win);\n");
+    emit(o, "    SDL_Quit();\n");
+    emit(o, "    return 0;\n");
+    emit(o, "}\n");
+}
+
 /* ── main entry ────────────────────────────────────────────────────────── */
 
 int codegen_generate(Node *program, COut *out) {
@@ -2314,9 +3091,13 @@ int codegen_generate(Node *program, COut *out) {
     out->buf[0] = '\0';
 
     emit_standard_headers(out, program);
+    if (has_ui_app(program))
+        emit(out, "#include <SDL2/SDL.h>\n\n");
     emit_type_definitions(out, program);
     emit_prototypes(out, program);
     emit_definitions(out, program);
+    if (has_ui_app(program))
+        emit_ui_app(out, program);
 
     return 1;
 }

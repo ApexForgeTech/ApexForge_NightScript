@@ -30,6 +30,7 @@ typedef enum {
     TOK_COLON,     /* : */
     TOK_COMMA,     /* , */
     TOK_DOT,       /* . */
+    TOK_DOTDOT,    /* .. */
     TOK_ARROW,     /* -> */
     TOK_FAT_ARROW, /* => */
     TOK_EQ,        /* = */

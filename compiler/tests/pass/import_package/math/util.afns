@@ -1,0 +1,7 @@
+package math.util;
+
+import math.helper;
+
+pub fn add_two(v: i32) -> i32 {
+    return inc(inc(v));
+}

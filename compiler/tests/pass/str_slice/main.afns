@@ -1,0 +1,23 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let s: str = "hello";
+    let a: str = s[1..4];
+    let b: str = s[..2];
+    let c: str = s[2..];
+
+    let owned: String = String.from("world");
+    defer owned.free();
+    let d: str = owned[1..4];
+
+    if a.len == 3 && a[0] == 101 &&
+       b.len == 2 && b[1] == 101 &&
+       c.len == 3 && c[0] == 108 &&
+       d.len == 3 && d[2] == 108 {
+        puts("ok");
+    }
+
+    return 0;
+}

@@ -1,0 +1,1 @@
+match arm 'Event.Click' expects 2 bindings, got 1

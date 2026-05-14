@@ -54,6 +54,7 @@ static const char *KIND_NAMES[TOK_COUNT] = {
     [TOK_COLON]     = ":",
     [TOK_COMMA]     = ",",
     [TOK_DOT]       = ".",
+    [TOK_DOTDOT]    = "..",
     [TOK_ARROW]     = "->",
     [TOK_FAT_ARROW] = "=>",
     [TOK_EQ]        = "=",

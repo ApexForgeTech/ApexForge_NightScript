@@ -22,6 +22,7 @@ typedef enum {
     NODE_CALL,
     NODE_FIELD,
     NODE_INDEX,
+    NODE_SLICE,
     NODE_CAST,
     NODE_ASSIGN,
     NODE_STRUCT_LIT,
@@ -54,6 +55,12 @@ typedef enum {
     NODE_UNION_DECL,
     NODE_IMPL_DECL,
     NODE_INTERFACE_DECL,
+
+    /* UI declarations (v0.4) */
+    NODE_UI_APP,
+    NODE_UI_ELEMENT,
+    NODE_UI_HANDLER,
+    NODE_UI_PROPERTY,
 } NodeKind;
 
 /* ── forward declaration ───────────────────────────────────────────────── */
@@ -135,6 +142,13 @@ struct Node {
             Node *index;
         } index_expr;
 
+        /* NODE_SLICE */
+        struct {
+            Node *object;
+            Node *start; /* may be NULL */
+            Node *end;   /* may be NULL */
+        } slice_expr;
+
         /* NODE_CAST */
         struct {
             Node *expr;
@@ -159,9 +173,10 @@ struct Node {
         /* NODE_MATCH */
         struct {
             Node    *subject;
-            /* each arm: pattern (NODE_IDENT used for wildcard "_",
-               or a dotted path stored as "EnumName.Variant") and value */
+            /* each arm stores a pattern key plus optional binding names */
             char   **patterns;
+            char  ***binding_names;
+            int    *binding_counts;
             Node   **values;
             int      count;
         } match;
@@ -235,6 +250,7 @@ struct Node {
         struct {
             char    *name;
             char    *owner_type;  /* NULL for free functions */
+            char    *package_name; /* declaring package */
             NodeList params;      /* each param: NODE_LET (name+type) */
             Node    *ret_type;
             Node    *body;        /* NULL for extern */
@@ -244,6 +260,7 @@ struct Node {
         /* NODE_EXTERN_FN */
         struct {
             char    *name;
+            char    *package_name; /* declaring package */
             char    *calling_conv; /* "C" or NULL */
             NodeList params;
             Node    *ret_type;
@@ -253,6 +270,7 @@ struct Node {
         /* NODE_STRUCT_DECL */
         struct {
             char    *name;
+            char    *package_name; /* declaring package */
             NodeList fields;   /* each field: NODE_LET (name+type) */
             int      is_public;
             int      is_packed;
@@ -262,6 +280,7 @@ struct Node {
            variant_fields[i] is NULL for simple variants, or a NodeList* for data-carrying */
         struct {
             char      *name;
+            char      *package_name; /* declaring package */
             char     **variants;       /* variant names */
             NodeList  *variant_fields; /* parallel: NULL entry = simple variant */
             int        count;
@@ -271,6 +290,7 @@ struct Node {
         /* NODE_UNION_DECL */
         struct {
             char    *name;
+            char    *package_name; /* declaring package */
             NodeList fields;
             int      is_public;
         } union_decl;
@@ -278,6 +298,7 @@ struct Node {
         /* NODE_IMPL_DECL */
         struct {
             char    *target;
+            char    *package_name; /* declaring package */
             char    *interface_name;  /* NULL for plain impl, set for impl T : Interface */
             NodeList methods;
         } impl;
@@ -285,11 +306,61 @@ struct Node {
         /* NODE_INTERFACE_DECL */
         struct {
             char    *name;
+            char    *package_name; /* declaring package */
             NodeList methods;  /* each: NODE_FN_DECL with body=NULL */
             int      is_public;
         } interface_decl;
 
+        /* NODE_UI_APP */
+        struct {
+            char    *name;
+            char    *package_name;
+            NodeList children;   /* NODE_UI_ELEMENT items */
+            int      is_public;
+        } ui_app;
+
+        /* NODE_UI_ELEMENT — window, button, label, input, row, column, canvas, panel, menu */
+        struct {
+            int      elem_kind;  /* UIElemKind */
+            char    *text;       /* title/label text, may be NULL */
+            NodeList properties; /* NODE_UI_PROPERTY items */
+            NodeList children;   /* nested UI elements */
+            NodeList handlers;   /* NODE_UI_HANDLER items */
+        } ui_element;
+
+        /* NODE_UI_HANDLER — onClick, onKey, onChange */
+        struct {
+            int   handler_kind; /* UIHandlerKind */
+            Node *body;         /* NODE_BLOCK */
+        } ui_handler;
+
+        /* NODE_UI_PROPERTY — name: value */
+        struct {
+            char *name;
+            Node *value; /* expression */
+        } ui_property;
+
     } as;
 };
+
+/* UI element kinds (stored in ui_element.elem_kind) */
+typedef enum {
+    UI_ELEM_WINDOW,
+    UI_ELEM_BUTTON,
+    UI_ELEM_LABEL,
+    UI_ELEM_INPUT,
+    UI_ELEM_ROW,
+    UI_ELEM_COLUMN,
+    UI_ELEM_CANVAS,
+    UI_ELEM_PANEL,
+    UI_ELEM_MENU,
+} UIElemKind;
+
+/* UI handler kinds (stored in ui_handler.handler_kind) */
+typedef enum {
+    UI_HANDLER_CLICK,
+    UI_HANDLER_KEY,
+    UI_HANDLER_CHANGE,
+} UIHandlerKind;
 
 #endif /* NIGHT_AST_H */

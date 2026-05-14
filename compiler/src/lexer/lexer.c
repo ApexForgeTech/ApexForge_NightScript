@@ -324,6 +324,15 @@ int lexer_tokenize(const char *source, const char *source_name, TokenList *out) 
         }
 
         /* single-char tokens */
+        if (c == '.' && peek_next(&l) == '.') {
+            advance(&l);
+            advance(&l);
+            t.kind = TOK_DOTDOT;
+            t.start = l.src + l.pos - 2;
+            t.len = 2;
+            goto push;
+        }
+
         advance(&l);
         t.start = l.src + l.pos - 1;
         t.len   = 1;

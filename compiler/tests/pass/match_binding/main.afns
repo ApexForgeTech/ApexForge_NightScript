@@ -1,0 +1,24 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Event {
+    Click(x: i32, y: i32);
+    Key(code: i32);
+    None;
+}
+
+fn main() -> i32 {
+    let e: Event = Event.Click(2, 3);
+    let v: i32 = match e {
+        Event.Click(x, y) => x + y,
+        Event.Key(code) => code,
+        Event.None => 0,
+    };
+
+    if v == 5 {
+        puts("ok");
+    }
+
+    return 0;
+}

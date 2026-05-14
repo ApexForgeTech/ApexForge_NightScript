@@ -1,0 +1,5 @@
+package math.helper;
+
+pub fn inc(v: i32) -> i32 {
+    return v + 1;
+}

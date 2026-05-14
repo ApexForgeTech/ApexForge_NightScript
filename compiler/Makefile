@@ -2,6 +2,7 @@ CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -pedantic -g \
           -Isrc -Isrc/lexer -Isrc/parser -Isrc/common \
           -Isrc/sema -Isrc/typeck -Isrc/codegen
+DEPFLAGS = -MMD -MP
 
 BUILD_DIR = build
 OBJ_DIR   = $(BUILD_DIR)/obj
@@ -17,6 +18,7 @@ SRC       = src/main.c \
             src/codegen/codegen.c
 
 OBJ       = $(SRC:src/%.c=$(OBJ_DIR)/%.o)
+DEP       = $(OBJ:.o=.d)
 TARGET    = $(BUILD_DIR)/night
 
 .PHONY: all clean test
@@ -29,10 +31,12 @@ $(TARGET): $(OBJ)
 
 $(OBJ_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 test: $(TARGET)
 	./tests/run_tests.sh
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+-include $(DEP)

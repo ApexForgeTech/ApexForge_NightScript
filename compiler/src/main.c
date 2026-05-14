@@ -23,16 +23,28 @@ typedef enum {
     CMD_FMT,
     CMD_INIT,
     CMD_CLEAN,
+    CMD_TEST,
 } Command;
+
+typedef struct {
+    char *name;
+    char *version;
+} DepEntry;
 
 typedef struct {
     char *root_dir;
     char *package_name;
+    char *version;
+    char *author;
+    char *description;
     char *target_mode;
     char *target_arch;
     char *target_backend;
     char *entry;
     char *output;
+    DepEntry *deps;
+    int dep_count;
+    int dep_cap;
 } ProjectConfig;
 
 typedef struct {
@@ -41,12 +53,14 @@ typedef struct {
     TokenList tokens;
     Node *ast;
     int include_in_package;
+    int imports_loaded;
 } SourceUnit;
 
 typedef struct {
     SourceUnit *units;
     int unit_count;
     int unit_cap;
+    char *root_dir;
     Arena arena;
     Node *ast;
     SemanticModel sema;
@@ -92,8 +106,9 @@ static void print_usage(void) {
             "  night codegen <file.afns>\n"
             "  night ast <file.afns>\n"
             "  night check <file.afns>\n"
-            "  night build <file.afns> [-o output]\n"
-            "  night run <file.afns> [-o output]\n"
+            "  night build <file.afns|project-dir> [-o output] [--target arch]\n"
+            "  night run <file.afns|project-dir> [-o output]\n"
+            "  night test [project-dir]\n"
             "  night fmt [file.afns|project-dir]\n"
             "  night init [dir]\n"
             "  night clean [file.afns|project-dir]\n");
@@ -167,6 +182,7 @@ static void compile_state_free(CompileState *state) {
     for (int i = 0; i < state->unit_count; i++)
         source_unit_free(&state->units[i]);
     free(state->units);
+    free(state->root_dir);
     if (state->codegen_ready)
         cout_free(&state->codegen);
     if (state->sema_ready)
@@ -195,6 +211,14 @@ static int push_source_unit(CompileState *state, const char *path) {
 
     state->unit_count++;
     return 1;
+}
+
+static int find_source_unit_index(CompileState *state, const char *path) {
+    for (int i = 0; i < state->unit_count; i++) {
+        if (state->units[i].path && !strcmp(state->units[i].path, path))
+            return i;
+    }
+    return -1;
 }
 
 static int has_afns_extension(const char *path) {
@@ -289,11 +313,19 @@ static void project_config_free(ProjectConfig *cfg) {
         return;
     free(cfg->root_dir);
     free(cfg->package_name);
+    free(cfg->version);
+    free(cfg->author);
+    free(cfg->description);
     free(cfg->target_mode);
     free(cfg->target_arch);
     free(cfg->target_backend);
     free(cfg->entry);
     free(cfg->output);
+    for (int i = 0; i < cfg->dep_count; i++) {
+        free(cfg->deps[i].name);
+        free(cfg->deps[i].version);
+    }
+    free(cfg->deps);
     memset(cfg, 0, sizeof(*cfg));
 }
 
@@ -408,6 +440,29 @@ static int parse_project_config(const char *project_dir, ProjectConfig *cfg) {
             if (!parse_toml_string(value, &cfg->package_name)) {
                 fprintf(stderr, "error: invalid package.name in '%s'\n", toml_path);
                 goto cleanup;
+            }
+        } else if (!strcmp(section, "package") && !strcmp(key, "version")) {
+            parse_toml_string(value, &cfg->version);
+        } else if (!strcmp(section, "package") && !strcmp(key, "author")) {
+            parse_toml_string(value, &cfg->author);
+        } else if (!strcmp(section, "package") && !strcmp(key, "description")) {
+            parse_toml_string(value, &cfg->description);
+        } else if (!strcmp(section, "deps")) {
+            /* each entry is:  dep_name = "version_req" */
+            char *dep_ver = NULL;
+            if (parse_toml_string(value, &dep_ver)) {
+                if (cfg->dep_count == cfg->dep_cap) {
+                    int nc = cfg->dep_cap ? cfg->dep_cap * 2 : 4;
+                    DepEntry *nd = realloc(cfg->deps, (size_t)nc * sizeof(DepEntry));
+                    if (nd) { cfg->deps = nd; cfg->dep_cap = nc; }
+                }
+                if (cfg->dep_count < cfg->dep_cap) {
+                    cfg->deps[cfg->dep_count].name    = dup_string(key);
+                    cfg->deps[cfg->dep_count].version = dep_ver;
+                    cfg->dep_count++;
+                } else {
+                    free(dep_ver);
+                }
             }
         } else if (!strcmp(section, "target") && !strcmp(key, "mode")) {
             if (!parse_toml_string(value, &cfg->target_mode)) {
@@ -793,6 +848,236 @@ cleanup:
     return ok;
 }
 
+static void free_path_list(char **paths, int count);
+static int load_source_unit(CompileState *state, int unit_index);
+
+static int collect_afns_files_in_dir(const char *dir_path, char ***out_paths, int *out_count) {
+    DIR *dir = NULL;
+    struct dirent *ent;
+    char **paths = NULL;
+    int count = 0;
+    int cap = 0;
+    int ok = 0;
+
+    dir = opendir(dir_path);
+    if (!dir) {
+        fprintf(stderr, "error: cannot open directory '%s': %s\n", dir_path, strerror(errno));
+        goto cleanup;
+    }
+
+    while ((ent = readdir(dir)) != NULL) {
+        struct stat st;
+        char *path;
+        char **new_paths;
+
+        if (ent->d_name[0] == '.')
+            continue;
+        if (!has_afns_extension(ent->d_name))
+            continue;
+
+        path = path_join(dir_path, ent->d_name);
+        if (!path) {
+            fprintf(stderr, "error: out of memory\n");
+            goto cleanup;
+        }
+
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            free(path);
+            continue;
+        }
+
+        if (count == cap) {
+            int new_cap = cap ? cap * 2 : 8;
+            new_paths = realloc(paths, (size_t)new_cap * sizeof(char *));
+            if (!new_paths) {
+                free(path);
+                fprintf(stderr, "error: out of memory\n");
+                goto cleanup;
+            }
+            paths = new_paths;
+            cap = new_cap;
+        }
+
+        paths[count++] = path;
+    }
+
+    qsort(paths, (size_t)count, sizeof(char *), compare_strings);
+    *out_paths = paths;
+    *out_count = count;
+    paths = NULL;
+    ok = 1;
+
+cleanup:
+    if (dir)
+        closedir(dir);
+    if (!ok) {
+        for (int i = 0; i < count; i++)
+            free(paths[i]);
+        free(paths);
+    }
+    return ok;
+}
+
+static int resolve_import_files(const char *root_dir, const char *import_path,
+                                char ***out_paths, int *out_count) {
+    char *slash_path = NULL;
+    char *relative_file = NULL;
+    char *relative_dir = NULL;
+    char *full_file = NULL;
+    char *full_dir = NULL;
+    size_t len;
+    int ok = 0;
+
+    *out_paths = NULL;
+    *out_count = 0;
+
+    len = strlen(import_path);
+    slash_path = malloc(len + 1);
+    if (!slash_path)
+        goto cleanup;
+    memcpy(slash_path, import_path, len + 1);
+    for (size_t i = 0; i < len; i++) {
+        if (slash_path[i] == '.')
+            slash_path[i] = '/';
+    }
+
+    relative_file = malloc(len + 6);
+    relative_dir = malloc(len + 1);
+    if (!relative_file || !relative_dir)
+        goto cleanup;
+    snprintf(relative_file, len + 6, "%s.afns", slash_path);
+    memcpy(relative_dir, slash_path, len + 1);
+
+    full_file = path_join(root_dir, relative_file);
+    full_dir = path_join(root_dir, relative_dir);
+    if (!full_file || !full_dir)
+        goto cleanup;
+
+    if (path_exists(full_file) && !path_is_dir(full_file)) {
+        *out_paths = malloc(sizeof(char *));
+        if (!*out_paths)
+            goto cleanup;
+        (*out_paths)[0] = dup_string(full_file);
+        if (!(*out_paths)[0]) {
+            free(*out_paths);
+            *out_paths = NULL;
+            goto cleanup;
+        }
+        *out_count = 1;
+        ok = 1;
+        goto cleanup;
+    }
+
+    if (path_is_dir(full_dir)) {
+        ok = collect_afns_files_in_dir(full_dir, out_paths, out_count);
+        goto cleanup;
+    }
+
+    /* fallback: check NIGHT_STDLIB environment variable for stdlib packages */
+    {
+        const char *stdlib_root = getenv("NIGHT_STDLIB");
+        if (stdlib_root && stdlib_root[0]) {
+            char *std_file = path_join(stdlib_root, relative_file);
+            char *std_dir  = path_join(stdlib_root, relative_dir);
+            if (std_file && path_exists(std_file) && !path_is_dir(std_file)) {
+                *out_paths = malloc(sizeof(char *));
+                if (*out_paths) {
+                    (*out_paths)[0] = std_file;
+                    std_file = NULL;
+                    *out_count = 1;
+                    ok = 1;
+                }
+            } else if (std_dir && path_is_dir(std_dir)) {
+                ok = collect_afns_files_in_dir(std_dir, out_paths, out_count);
+            }
+            free(std_file);
+            free(std_dir);
+        }
+    }
+
+cleanup:
+    free(slash_path);
+    free(relative_file);
+    free(relative_dir);
+    free(full_file);
+    free(full_dir);
+    return ok;
+}
+
+static int import_in_stack(const char *import_path, const char **stack, int stack_count) {
+    for (int i = 0; i < stack_count; i++) {
+        if (!strcmp(stack[i], import_path))
+            return 1;
+    }
+    return 0;
+}
+
+static int load_imports_recursive(CompileState *state, int unit_index,
+                                  const char **stack, int stack_count) {
+    SourceUnit *unit = &state->units[unit_index];
+    const char *next_stack[128];
+
+    if (!unit->ast || unit->imports_loaded)
+        return 1;
+
+    if (stack_count >= (int)(sizeof(next_stack) / sizeof(next_stack[0])) - 1) {
+        fprintf(stderr, "error: import nesting too deep\n");
+        return 0;
+    }
+
+    for (int i = 0; i < stack_count; i++)
+        next_stack[i] = stack[i];
+
+    if (unit->ast->as.program.package && unit->ast->as.program.package->as.pkg.path)
+        next_stack[stack_count++] = unit->ast->as.program.package->as.pkg.path;
+
+    for (int i = 0; i < unit->ast->as.program.imports.count; i++) {
+        const char *import_path = unit->ast->as.program.imports.items[i]->as.pkg.path;
+        char **paths = NULL;
+        int path_count = 0;
+
+        if (import_in_stack(import_path, next_stack, stack_count)) {
+            fprintf(stderr, "%s:%d:%d: error: circular import detected for '%s'\n",
+                    unit->path,
+                    unit->ast->as.program.imports.items[i]->line,
+                    unit->ast->as.program.imports.items[i]->col,
+                    import_path);
+            return 0;
+        }
+
+        if (!resolve_import_files(state->root_dir, import_path, &paths, &path_count)) {
+            continue;
+        }
+
+        for (int j = 0; j < path_count; j++) {
+            int imported_index = find_source_unit_index(state, paths[j]);
+            if (imported_index < 0) {
+                if (!push_source_unit(state, paths[j])) {
+                    free_path_list(paths, path_count);
+                    fprintf(stderr, "error: out of memory\n");
+                    return 0;
+                }
+                imported_index = state->unit_count - 1;
+                if (!load_source_unit(state, imported_index)) {
+                    free_path_list(paths, path_count);
+                    return 0;
+                }
+            }
+
+            state->units[imported_index].include_in_package = 1;
+            if (!load_imports_recursive(state, imported_index, next_stack, stack_count)) {
+                free_path_list(paths, path_count);
+                return 0;
+            }
+        }
+
+        free_path_list(paths, path_count);
+    }
+
+    unit->imports_loaded = 1;
+    return 1;
+}
+
 static void free_path_list(char **paths, int count) {
     for (int i = 0; i < count; i++)
         free(paths[i]);
@@ -869,6 +1154,11 @@ static int compile_source(const char *path, CompileState *state) {
     int entry_unit_index = 0;
 
     compile_state_init(state);
+    state->root_dir = path_dirname(path);
+    if (!state->root_dir) {
+        fprintf(stderr, "error: out of memory\n");
+        return 0;
+    }
 
     arena_init(&state->arena);
     state->arena_ready = 1;
@@ -917,8 +1207,16 @@ static int compile_source(const char *path, CompileState *state) {
         }
 
         free_path_list(package_paths, package_path_count);
-        state->ast = merge_package_program(state, entry_unit_index);
     }
+
+    for (int i = 0; i < state->unit_count; i++) {
+        if (!state->units[i].include_in_package)
+            continue;
+        if (!load_imports_recursive(state, i, NULL, 0))
+            return 0;
+    }
+
+    state->ast = merge_package_program(state, entry_unit_index);
 
     if (!sema_analyze(state->ast, path, &state->sema))
         return 0;
@@ -950,7 +1248,7 @@ static int write_text_file(const char *path, const char *text) {
     return 1;
 }
 
-static int invoke_cc(const char *c_path, const char *out_path) {
+static int invoke_cc(const char *c_path, const char *out_path, const char *extra_flags) {
     const char *cc = getenv("CC");
     char *q_cc;
     char *q_c;
@@ -958,9 +1256,12 @@ static int invoke_cc(const char *c_path, const char *out_path) {
     char *cmd;
     int ok = 0;
     int rc;
+    size_t cmd_len;
 
     if (!cc || !cc[0])
         cc = "gcc";
+    if (!extra_flags)
+        extra_flags = "";
 
     q_cc = shell_quote(cc);
     q_c = shell_quote(c_path);
@@ -970,14 +1271,14 @@ static int invoke_cc(const char *c_path, const char *out_path) {
         goto cleanup;
     }
 
-    cmd = malloc(strlen(q_cc) + strlen(q_c) + strlen(q_out) + 64);
+    cmd_len = strlen(q_cc) + strlen(q_c) + strlen(q_out) + strlen(extra_flags) + 64;
+    cmd = malloc(cmd_len);
     if (!cmd) {
         fprintf(stderr, "error: out of memory\n");
         goto cleanup;
     }
 
-    snprintf(cmd, strlen(q_cc) + strlen(q_c) + strlen(q_out) + 64,
-             "%s -std=c11 %s -o %s", q_cc, q_c, q_out);
+    snprintf(cmd, cmd_len, "%s -std=c11 %s -o %s %s", q_cc, q_c, q_out, extra_flags);
     rc = system(cmd);
     free(cmd);
     ok = (rc == 0);
@@ -992,13 +1293,25 @@ cleanup:
     return ok;
 }
 
+static int program_has_ui(CompileState *state) {
+    if (!state->ast) return 0;
+    for (int i = 0; i < state->ast->as.program.decls.count; i++)
+        if (state->ast->as.program.decls.items[i]->kind == NODE_UI_APP)
+            return 1;
+    return 0;
+}
+
 static int build_binary(const char *src_path, const char *binary_path) {
     CompileState state;
     char *c_path = NULL;
     int ok = 0;
+    const char *extra_flags = "";
 
     if (!compile_source(src_path, &state))
         return 1;
+
+    if (program_has_ui(&state))
+        extra_flags = "-lSDL2";
 
     c_path = replace_extension(binary_path, ".generated.c");
     if (!c_path) {
@@ -1012,7 +1325,7 @@ static int build_binary(const char *src_path, const char *binary_path) {
     if (!write_text_file(c_path, state.codegen.buf))
         goto cleanup;
 
-    if (!invoke_cc(c_path, binary_path))
+    if (!invoke_cc(c_path, binary_path, extra_flags))
         goto cleanup;
 
     ok = 1;
@@ -1027,6 +1340,7 @@ int main(int argc, char **argv) {
     Command cmd = CMD_CODEGEN;
     const char *path = NULL;
     const char *output_path = NULL;
+    const char *target_arch = NULL;
     char *resolved_path = NULL;
     char *resolved_output = NULL;
     int argi = 1;
@@ -1050,6 +1364,9 @@ int main(int argc, char **argv) {
         argi++;
     } else if (!strcmp(argv[argi], "run")) {
         cmd = CMD_RUN;
+        argi++;
+    } else if (!strcmp(argv[argi], "test")) {
+        cmd = CMD_TEST;
         argi++;
     } else if (!strcmp(argv[argi], "fmt")) {
         cmd = CMD_FMT;
@@ -1087,6 +1404,16 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(argv[argi], "--target")) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "error: expected target after --target\n");
+                return 1;
+            }
+            target_arch = argv[argi + 1];
+            argi += 2;
+            continue;
+        }
+
         fprintf(stderr, "error: unknown argument '%s'\n", argv[argi]);
         print_usage();
         return 1;
@@ -1121,6 +1448,48 @@ int main(int argc, char **argv) {
     path = resolved_path;
     if (!output_path && resolved_output)
         output_path = resolved_output;
+
+    /* suppress unused warning — target_arch may be used for cross-compilation later */
+    (void)target_arch;
+
+    if (cmd == CMD_TEST) {
+        /* Discover and run tests: look for tests/ directory inside the project */
+        const char *test_dir_rel = "tests";
+        char *test_dir = NULL;
+        char **test_files = NULL;
+        int test_count = 0;
+        int passed = 0, failed = 0;
+
+        if (path) {
+            test_dir = path_join(path, test_dir_rel);
+        } else {
+            test_dir = dup_string(test_dir_rel);
+        }
+
+        if (test_dir && path_is_dir(test_dir)) {
+            collect_afns_files_in_dir(test_dir, &test_files, &test_count);
+            for (int i = 0; i < test_count; i++) {
+                CompileState ts;
+                if (compile_source(test_files[i], &ts)) {
+                    printf("PASS: %s\n", test_files[i]);
+                    passed++;
+                } else {
+                    printf("FAIL: %s\n", test_files[i]);
+                    failed++;
+                }
+                compile_state_free(&ts);
+                free(test_files[i]);
+            }
+            free(test_files);
+        } else {
+            fprintf(stderr, "note: no tests/ directory found\n");
+        }
+        free(test_dir);
+        free(resolved_path);
+        free(resolved_output);
+        printf("\n%d passed, %d failed\n", passed, failed);
+        return failed > 0 ? 1 : 0;
+    }
 
     if (cmd == CMD_BUILD || cmd == CMD_RUN) {
         char *default_out = NULL;

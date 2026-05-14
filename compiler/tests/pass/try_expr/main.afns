@@ -1,0 +1,50 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+enum Error {
+    Bad;
+}
+
+fn step(v: i32) -> Result[i32, Error] {
+    if v > 0 {
+        return Ok(v + 1);
+    }
+    return Err(Error.Bad);
+}
+
+fn maybe(v: i32) -> Option[i32] {
+    if v > 0 {
+        return Some(v);
+    }
+    return None;
+}
+
+fn sum_pair(v: i32) -> Result[i32, Error] {
+    return Ok(step(v)? + step(v + 1)?);
+}
+
+fn bump(v: i32) -> Option[i32] {
+    return Some(maybe(v)? + 1);
+}
+
+fn main() -> i32 {
+    let r: Result[i32, Error] = sum_pair(1);
+    let o: Option[i32] = bump(1);
+
+    let a: i32 = match r {
+        Ok(v) => v,
+        Err => 0,
+    };
+
+    let b: i32 = match o {
+        Some(v) => v,
+        None => 0,
+    };
+
+    if a == 5 && b == 2 {
+        puts("ok");
+    }
+
+    return 0;
+}

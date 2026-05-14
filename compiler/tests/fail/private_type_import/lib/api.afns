@@ -1,0 +1,9 @@
+package lib.api;
+
+struct Secret {
+    value: i32,
+}
+
+pub fn make() -> Secret {
+    return Secret { value: 7 };
+}

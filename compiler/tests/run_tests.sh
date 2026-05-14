@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..36\n'
+printf '1..49\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -129,34 +129,42 @@ if ! printf 'A' | cmp -s - "$TMP_DIR/stdout"; then
 fi
 printf 'ok 13 - char literal\n'
 
+run_capture "pub ast" "$NIGHT" ast "$PASS_DIR/pub_ast/main.afns"
+assert_contains "$TMP_DIR/stdout" "ExternFn(name=puts, abi=C, pub)" "pub extern ast"
+assert_contains "$TMP_DIR/stdout" "FnDecl(name=foo, pub)" "pub function ast"
+assert_contains "$TMP_DIR/stdout" "StructDecl(name=Box, packed=false, pub)" "pub struct ast"
+assert_contains "$TMP_DIR/stdout" "EnumDecl(name=Color, pub)" "pub enum ast"
+assert_contains "$TMP_DIR/stdout" "UnionDecl(name=Bits, pub)" "pub union ast"
+printf 'ok 14 - pub visibility tracking\n'
+
 run_capture "const while check" "$NIGHT" check "$PASS_DIR/const_while/main.afns"
 run_capture "const while run" "$NIGHT" run "$PASS_DIR/const_while/main.afns" -o "$TMP_DIR/const_while_run"
 assert_contains "$TMP_DIR/stdout" "ok" "const while run"
-printf 'ok 14 - const declaration and while loop\n'
+printf 'ok 15 - const declaration and while loop\n'
 
 run_capture "const ptr check" "$NIGHT" check "$PASS_DIR/const_ptr/main.afns"
 run_capture "const ptr run" "$NIGHT" run "$PASS_DIR/const_ptr/main.afns" -o "$TMP_DIR/const_ptr_run"
 assert_contains "$TMP_DIR/stdout" "ok" "const ptr run"
-printf 'ok 15 - unsafe const pointer flow\n'
+printf 'ok 16 - unsafe const pointer flow\n'
 
 run_capture "defer check" "$NIGHT" check "$PASS_DIR/defer_test/main.afns"
 run_capture "defer build" "$NIGHT" build "$PASS_DIR/defer_test/main.afns" -o "$TMP_DIR/defer_bin"
 run_capture "defer codegen" "$NIGHT" codegen "$PASS_DIR/defer_test/main.afns"
 assert_contains "$TMP_DIR/stdout" "puts(\"goodbye\")" "defer call emission"
-printf 'ok 16 - defer statement\n'
+printf 'ok 17 - defer statement\n'
 
 run_capture "for loop check" "$NIGHT" check "$PASS_DIR/for_loop/main.afns"
 run_capture "for loop build" "$NIGHT" build "$PASS_DIR/for_loop/main.afns" -o "$TMP_DIR/for_bin"
 run_capture "for loop codegen" "$NIGHT" codegen "$PASS_DIR/for_loop/main.afns"
 assert_contains "$TMP_DIR/stdout" "for (int32_t i = 0;" "for loop init emission"
 assert_contains "$TMP_DIR/stdout" "i += 1)" "for loop post emission"
-printf 'ok 17 - for loop\n'
+printf 'ok 18 - for loop\n'
 
 run_capture "packed struct check" "$NIGHT" check "$PASS_DIR/packed_struct/main.afns"
 run_capture "packed struct build" "$NIGHT" build "$PASS_DIR/packed_struct/main.afns" -o "$TMP_DIR/packed_bin"
 run_capture "packed struct codegen" "$NIGHT" codegen "$PASS_DIR/packed_struct/main.afns"
 assert_contains "$TMP_DIR/stdout" "__attribute__((packed))" "packed struct emission"
-printf 'ok 18 - packed struct\n'
+printf 'ok 19 - packed struct\n'
 
 run_capture "data enum constructor check" "$NIGHT" check "$PASS_DIR/data_enum_ctor/main.afns"
 run_capture "data enum constructor build" "$NIGHT" build "$PASS_DIR/data_enum_ctor/main.afns" -o "$TMP_DIR/data_enum_ctor_bin"
@@ -164,7 +172,7 @@ run_capture "data enum constructor run" "$NIGHT" run "$PASS_DIR/data_enum_ctor/m
 assert_contains "$TMP_DIR/stdout" "ok" "data enum constructor run"
 run_capture "data enum constructor codegen" "$NIGHT" codegen "$PASS_DIR/data_enum_ctor/main.afns"
 assert_contains "$TMP_DIR/stdout" ".tag = Event_Click" "data enum constructor codegen"
-printf 'ok 19 - data enum constructor\n'
+printf 'ok 20 - data enum constructor\n'
 
 run_capture "defer scope check" "$NIGHT" check "$PASS_DIR/defer_scope/main.afns"
 run_capture "defer scope run" "$NIGHT" run "$PASS_DIR/defer_scope/main.afns" -o "$TMP_DIR/defer_scope_run"
@@ -175,7 +183,7 @@ if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/defer_scope/main.out"; then
     cat "$TMP_DIR/stdout" >&2
     fail "defer scope run output mismatch"
 fi
-printf 'ok 20 - defer scope exit\n'
+printf 'ok 21 - defer scope exit\n'
 
 run_capture "defer control flow check" "$NIGHT" check "$PASS_DIR/defer_control_flow/main.afns"
 run_capture "defer control flow run" "$NIGHT" run "$PASS_DIR/defer_control_flow/main.afns" -o "$TMP_DIR/defer_control_flow_run"
@@ -186,28 +194,64 @@ if ! cmp -s "$TMP_DIR/stdout" "$PASS_DIR/defer_control_flow/main.out"; then
     cat "$TMP_DIR/stdout" >&2
     fail "defer control flow run output mismatch"
 fi
-printf 'ok 21 - defer break and continue\n'
+printf 'ok 22 - defer break and continue\n'
 
 run_capture "keyword path check" "$NIGHT" check "$PASS_DIR/path_keywords/main.afns"
-printf 'ok 22 - keyword package and import paths\n'
+printf 'ok 23 - keyword package and import paths\n'
+
+run_capture "str view check" "$NIGHT" check "$PASS_DIR/str_view/main.afns"
+run_capture "str view run" "$NIGHT" run "$PASS_DIR/str_view/main.afns" -o "$TMP_DIR/str_view_run"
+run_capture "str view codegen" "$NIGHT" codegen "$PASS_DIR/str_view/main.afns"
+assert_contains "$TMP_DIR/stdout" "typedef struct NStr" "str typedef emission"
+assert_contains "$TMP_DIR/stdout" ".len = 3" "str literal len lowering"
+printf 'ok 24 - str view string system\n'
+
+run_capture "str index check" "$NIGHT" check "$PASS_DIR/str_index/main.afns"
+run_capture "str index run" "$NIGHT" run "$PASS_DIR/str_index/main.afns" -o "$TMP_DIR/str_index_run"
+assert_contains "$TMP_DIR/stdout" "ok" "str index run"
+printf 'ok 25 - str indexing\n'
+
+run_capture "owned string check" "$NIGHT" check "$PASS_DIR/string_owned/main.afns"
+run_capture "owned string run" "$NIGHT" run "$PASS_DIR/string_owned/main.afns" -o "$TMP_DIR/string_owned_run"
+run_capture "owned string codegen" "$NIGHT" codegen "$PASS_DIR/string_owned/main.afns"
+assert_contains "$TMP_DIR/stdout" "typedef struct NString" "owned string typedef emission"
+printf 'ok 26 - owned String type\n'
+
+run_capture "str slice check" "$NIGHT" check "$PASS_DIR/str_slice/main.afns"
+run_capture "str slice run" "$NIGHT" run "$PASS_DIR/str_slice/main.afns" -o "$TMP_DIR/str_slice_run"
+assert_contains "$TMP_DIR/stdout" "ok" "str slice run"
+printf 'ok 27 - str slicing\n'
+
+run_capture "array slice check" "$NIGHT" check "$PASS_DIR/array_slice/main.afns"
+run_capture "array slice run" "$NIGHT" run "$PASS_DIR/array_slice/main.afns" -o "$TMP_DIR/array_slice_run"
+assert_contains "$TMP_DIR/stdout" "ok" "array slice run"
+printf 'ok 28 - array and slice slicing\n'
+
+run_capture "match binding check" "$NIGHT" check "$PASS_DIR/match_binding/main.afns"
+run_capture "match binding run" "$NIGHT" run "$PASS_DIR/match_binding/main.afns" -o "$TMP_DIR/match_binding_run"
+assert_contains "$TMP_DIR/stdout" "ok" "match binding run"
+printf 'ok 29 - match payload binding\n'
 
 run_fail_case "$FAIL_DIR/non_exhaustive_match.afns" "$FAIL_DIR/non_exhaustive_match.err" "non exhaustive match diagnostic"
-printf 'ok 23 - non exhaustive match diagnostic\n'
+printf 'ok 30 - non exhaustive match diagnostic\n'
 
 run_fail_case "$FAIL_DIR/duplicate_match_arm.afns" "$FAIL_DIR/duplicate_match_arm.err" "duplicate match arm diagnostic"
-printf 'ok 24 - duplicate match arm diagnostic\n'
+printf 'ok 31 - duplicate match arm diagnostic\n'
+
+run_fail_case "$FAIL_DIR/match_binding_arity.afns" "$FAIL_DIR/match_binding_arity.err" "match binding arity diagnostic"
+printf 'ok 32 - match binding arity diagnostic\n'
 
 run_fail_case "$FAIL_DIR/enum_ctor_bad_arity.afns" "$FAIL_DIR/enum_ctor_bad_arity.err" "enum constructor arity diagnostic"
-printf 'ok 25 - enum constructor arity diagnostic\n'
+printf 'ok 33 - enum constructor arity diagnostic\n'
 
 run_fail_case "$FAIL_DIR/enum_ctor_bad_type.afns" "$FAIL_DIR/enum_ctor_bad_type.err" "enum constructor type diagnostic"
-printf 'ok 26 - enum constructor type diagnostic\n'
+printf 'ok 34 - enum constructor type diagnostic\n'
 
 run_capture "legacy data enum check" "$NIGHT" check "$PASS_DIR/data_enum/main.afns"
-printf 'ok 27 - existing data enum program still checks\n'
+printf 'ok 35 - existing data enum program still checks\n'
 
 run_fail_case "$FAIL_DIR/import_missing.afns" "$FAIL_DIR/import_missing.err" "import missing diagnostic"
-printf 'ok 28 - import missing diagnostic\n'
+printf 'ok 36 - import missing diagnostic\n'
 
 run_capture "option result check" "$NIGHT" check "$PASS_DIR/option_result_check/main.afns"
 run_capture "option result build" "$NIGHT" build "$PASS_DIR/option_result_check/main.afns" -o "$TMP_DIR/option_result_bin"
@@ -215,23 +259,28 @@ run_capture "option result run" "$NIGHT" run "$PASS_DIR/option_result_check/main
 run_capture "option result codegen" "$NIGHT" codegen "$PASS_DIR/option_result_check/main.afns"
 assert_contains "$TMP_DIR/stdout" "typedef struct NS_Option_i32" "option typedef emission"
 assert_contains "$TMP_DIR/stdout" "typedef struct NS_Result_i32_Error" "result typedef emission"
-printf 'ok 29 - option result build and run\n'
+printf 'ok 37 - option result build and run\n'
 
 run_capture "option result match check" "$NIGHT" check "$PASS_DIR/option_result_match/main.afns"
 run_capture "option result match run" "$NIGHT" run "$PASS_DIR/option_result_match/main.afns" -o "$TMP_DIR/option_result_match_run"
 assert_contains "$TMP_DIR/stdout" "ok" "option result match run"
-printf 'ok 30 - option result match\n'
+printf 'ok 38 - option result match\n'
 
 run_capture "result try check" "$NIGHT" check "$PASS_DIR/result_try/main.afns"
 run_capture "result try run" "$NIGHT" run "$PASS_DIR/result_try/main.afns" -o "$TMP_DIR/result_try_run"
 assert_contains "$TMP_DIR/stdout" "ok" "result try run"
-printf 'ok 31 - result try propagation\n'
+printf 'ok 39 - result try propagation\n'
+
+run_capture "generic try expr check" "$NIGHT" check "$PASS_DIR/try_expr/main.afns"
+run_capture "generic try expr run" "$NIGHT" run "$PASS_DIR/try_expr/main.afns" -o "$TMP_DIR/try_expr_run"
+assert_contains "$TMP_DIR/stdout" "ok" "generic try expr run"
+printf 'ok 40 - generic try expression lowering\n'
 
 run_fail_case "$FAIL_DIR/some_without_context.afns" "$FAIL_DIR/some_without_context.err" "some without context diagnostic"
-printf 'ok 32 - some without context diagnostic\n'
+printf 'ok 41 - some without context diagnostic\n'
 
 run_fail_case "$FAIL_DIR/option_some_bad_type.afns" "$FAIL_DIR/option_some_bad_type.err" "option some bad type diagnostic"
-printf 'ok 33 - option some bad type diagnostic\n'
+printf 'ok 42 - option some bad type diagnostic\n'
 
 cp "$PASS_DIR/fmt_input/main.afns" "$TMP_DIR/fmt_main.afns"
 run_capture "fmt command" "$NIGHT" fmt "$TMP_DIR/fmt_main.afns"
@@ -242,7 +291,7 @@ if ! cmp -s "$TMP_DIR/fmt_main.afns" "$PASS_DIR/fmt_input/main.expected"; then
     cat "$TMP_DIR/fmt_main.afns" >&2
     fail "fmt command output mismatch"
 fi
-printf 'ok 34 - fmt command\n'
+printf 'ok 43 - fmt command\n'
 
 mkdir -p "$TMP_DIR/project_cli/src"
 cp "$PASS_DIR/project_cli/night.toml" "$TMP_DIR/project_cli/night.toml"
@@ -261,7 +310,7 @@ run_capture "project clean" sh -c "cd \"$TMP_DIR/project_cli\" && \"$NIGHT\" cle
 if [ -e "$TMP_DIR/project_cli/project_cli_bin" ] || [ -e "$TMP_DIR/project_cli/project_cli_bin.generated.c" ]; then
     fail "project clean did not remove build outputs"
 fi
-printf 'ok 35 - night.toml project flow\n'
+printf 'ok 44 - night.toml project flow\n'
 
 run_capture "init command" "$NIGHT" init "$TMP_DIR/init_proj"
 if [ ! -f "$TMP_DIR/init_proj/night.toml" ] || [ ! -f "$TMP_DIR/init_proj/src/main.afns" ]; then
@@ -270,4 +319,18 @@ fi
 assert_contains "$TMP_DIR/init_proj/night.toml" "[target]" "init target section"
 assert_contains "$TMP_DIR/init_proj/night.toml" "mode = \"native\"" "init target mode"
 assert_contains "$TMP_DIR/init_proj/night.toml" "backend = \"c\"" "init target backend"
-printf 'ok 36 - init command\n'
+printf 'ok 45 - init command\n'
+
+run_capture "import package check" "$NIGHT" check "$PASS_DIR/import_package/main.afns"
+run_capture "import package run" "$NIGHT" run "$PASS_DIR/import_package/main.afns" -o "$TMP_DIR/import_package_run"
+assert_contains "$TMP_DIR/stdout" "ok" "import package run"
+printf 'ok 46 - recursive package imports\n'
+
+run_fail_case "$FAIL_DIR/circular_import/main.afns" "$FAIL_DIR/circular_import.err" "circular import diagnostic"
+printf 'ok 47 - circular import diagnostic\n'
+
+run_fail_case "$FAIL_DIR/private_import/main.afns" "$FAIL_DIR/private_import.err" "private function import diagnostic"
+printf 'ok 48 - private function import diagnostic\n'
+
+run_fail_case "$FAIL_DIR/private_type_import/main.afns" "$FAIL_DIR/private_type_import.err" "private type import diagnostic"
+printf 'ok 49 - private type import diagnostic\n'

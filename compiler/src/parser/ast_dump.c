@@ -63,7 +63,15 @@ static void dump_match(FILE *out, Node *node, int indent) {
     dump_node(out, node->as.match.subject, indent + 2);
     for (int i = 0; i < node->as.match.count; i++) {
         print_indent(out, indent + 1);
-        fprintf(out, "arm[%d](pattern=%s):\n", i, node->as.match.patterns[i]);
+        fprintf(out, "arm[%d](pattern=%s", i, node->as.match.patterns[i]);
+        if (node->as.match.binding_counts && node->as.match.binding_counts[i] > 0) {
+            fprintf(out, ", bindings=");
+            for (int j = 0; j < node->as.match.binding_counts[i]; j++) {
+                if (j) fprintf(out, ",");
+                fprintf(out, "%s", node->as.match.binding_names[i][j]);
+            }
+        }
+        fprintf(out, "):\n");
         dump_node(out, node->as.match.values[i], indent + 2);
     }
 }
@@ -79,12 +87,14 @@ static void dump_struct_lit(FILE *out, Node *node, int indent) {
 }
 
 static void dump_fn_like(FILE *out, const char *kind, const char *name, const char *owner,
-                         NodeList *params, Node *ret_type, Node *body, int indent) {
+                         int is_public, NodeList *params, Node *ret_type, Node *body, int indent) {
     print_indent(out, indent);
     if (owner)
-        fprintf(out, "%s(name=%s, owner=%s)\n", kind, name, owner);
+        fprintf(out, "%s(name=%s, owner=%s%s)\n", kind, name, owner,
+                is_public ? ", pub" : "");
     else
-        fprintf(out, "%s(name=%s)\n", kind, name);
+        fprintf(out, "%s(name=%s%s)\n", kind, name,
+                is_public ? ", pub" : "");
 
     dump_node_list(out, "params", params, indent + 1);
     if (ret_type) {
@@ -212,6 +222,19 @@ static void dump_node(FILE *out, Node *node, int indent) {
             print_child_label(out, indent + 1, "index");
             dump_node(out, node->as.index_expr.index, indent + 2);
             return;
+        case NODE_SLICE:
+            print_line(out, indent, "Slice");
+            print_child_label(out, indent + 1, "object");
+            dump_node(out, node->as.slice_expr.object, indent + 2);
+            if (node->as.slice_expr.start) {
+                print_child_label(out, indent + 1, "start");
+                dump_node(out, node->as.slice_expr.start, indent + 2);
+            }
+            if (node->as.slice_expr.end) {
+                print_child_label(out, indent + 1, "end");
+                dump_node(out, node->as.slice_expr.end, indent + 2);
+            }
+            return;
         case NODE_STRUCT_LIT:
             dump_struct_lit(out, node, indent);
             return;
@@ -319,13 +342,15 @@ static void dump_node(FILE *out, Node *node, int indent) {
             return;
         case NODE_FN_DECL:
             dump_fn_like(out, "FnDecl", node->as.fn.name, node->as.fn.owner_type,
+                         node->as.fn.is_public,
                          &node->as.fn.params, node->as.fn.ret_type, node->as.fn.body, indent);
             return;
         case NODE_EXTERN_FN:
             print_indent(out, indent);
-            fprintf(out, "ExternFn(name=%s, abi=%s)\n",
+            fprintf(out, "ExternFn(name=%s, abi=%s%s)\n",
                     node->as.extern_fn.name,
-                    node->as.extern_fn.calling_conv ? node->as.extern_fn.calling_conv : "default");
+                    node->as.extern_fn.calling_conv ? node->as.extern_fn.calling_conv : "default",
+                    node->as.extern_fn.is_public ? ", pub" : "");
             dump_node_list(out, "params", &node->as.extern_fn.params, indent + 1);
             if (node->as.extern_fn.ret_type) {
                 print_child_label(out, indent + 1, "ret");
@@ -334,14 +359,16 @@ static void dump_node(FILE *out, Node *node, int indent) {
             return;
         case NODE_STRUCT_DECL:
             print_indent(out, indent);
-            fprintf(out, "StructDecl(name=%s, packed=%s)\n",
+            fprintf(out, "StructDecl(name=%s, packed=%s%s)\n",
                     node->as.struct_decl.name,
-                    bool_word(node->as.struct_decl.is_packed));
+                    bool_word(node->as.struct_decl.is_packed),
+                    node->as.struct_decl.is_public ? ", pub" : "");
             dump_node_list(out, "fields", &node->as.struct_decl.fields, indent + 1);
             return;
         case NODE_ENUM_DECL:
             print_indent(out, indent);
-            fprintf(out, "EnumDecl(name=%s)\n", node->as.enum_decl.name);
+            fprintf(out, "EnumDecl(name=%s%s)\n", node->as.enum_decl.name,
+                    node->as.enum_decl.is_public ? ", pub" : "");
             for (int i = 0; i < node->as.enum_decl.count; i++) {
                 print_indent(out, indent + 1);
                 fprintf(out, "variant[%d]=%s\n", i, node->as.enum_decl.variants[i]);
@@ -349,7 +376,8 @@ static void dump_node(FILE *out, Node *node, int indent) {
             return;
         case NODE_UNION_DECL:
             print_indent(out, indent);
-            fprintf(out, "UnionDecl(name=%s)\n", node->as.union_decl.name);
+            fprintf(out, "UnionDecl(name=%s%s)\n", node->as.union_decl.name,
+                    node->as.union_decl.is_public ? ", pub" : "");
             dump_node_list(out, "fields", &node->as.union_decl.fields, indent + 1);
             return;
         case NODE_IMPL_DECL:
@@ -367,6 +395,40 @@ static void dump_node(FILE *out, Node *node, int indent) {
                     node->as.interface_decl.name,
                     node->as.interface_decl.is_public ? ", pub" : "");
             dump_node_list(out, "methods", &node->as.interface_decl.methods, indent + 1);
+            return;
+        case NODE_UI_APP:
+            print_indent(out, indent);
+            fprintf(out, "UIApp(name=%s%s)\n", node->as.ui_app.name,
+                    node->as.ui_app.is_public ? ", pub" : "");
+            dump_node_list(out, "children", &node->as.ui_app.children, indent + 1);
+            return;
+        case NODE_UI_ELEMENT: {
+            static const char *elem_names[] = {
+                "window","button","label","input","row","column","canvas","panel","menu"
+            };
+            print_indent(out, indent);
+            fprintf(out, "UIElement(kind=%s", elem_names[node->as.ui_element.elem_kind]);
+            if (node->as.ui_element.text)
+                fprintf(out, ", text=\"%s\"", node->as.ui_element.text);
+            fprintf(out, ")\n");
+            dump_node_list(out, "properties", &node->as.ui_element.properties, indent + 1);
+            dump_node_list(out, "children",   &node->as.ui_element.children,   indent + 1);
+            dump_node_list(out, "handlers",   &node->as.ui_element.handlers,   indent + 1);
+            return;
+        }
+        case NODE_UI_HANDLER: {
+            static const char *handler_names[] = { "onClick", "onKey", "onChange" };
+            print_indent(out, indent);
+            fprintf(out, "UIHandler(kind=%s)\n", handler_names[node->as.ui_handler.handler_kind]);
+            print_child_label(out, indent + 1, "body");
+            dump_node(out, node->as.ui_handler.body, indent + 2);
+            return;
+        }
+        case NODE_UI_PROPERTY:
+            print_indent(out, indent);
+            fprintf(out, "UIProperty(name=%s)\n", node->as.ui_property.name);
+            print_child_label(out, indent + 1, "value");
+            dump_node(out, node->as.ui_property.value, indent + 2);
             return;
         default:
             print_line(out, indent, "<unknown node>");

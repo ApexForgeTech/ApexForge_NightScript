@@ -13,6 +13,7 @@ typedef struct {
     const char *src_name;
     Arena      *arena;
     int         had_error;
+    char       *current_package;
 } Parser;
 
 /* ── helpers ───────────────────────────────────────────────────────────── */
@@ -40,7 +41,16 @@ static Token *expect(Parser *p, TokenKind k, const char *msg) {
     fprintf(stderr, "%s:%d:%d: error: %s (got '%s')\n",
             p->src_name, t->line, t->col, msg, token_kind_name(t->kind));
     p->had_error = 1;
+    if (t->kind != TOK_EOF)
+        p->pos++;
     return t;
+}
+
+static int cur_ident_is(Parser *p, const char *name) {
+    Token *t = cur(p);
+    size_t len = strlen(name);
+    return t->kind == TOK_IDENT && (size_t)t->len == len &&
+           memcmp(t->start, name, len) == 0;
 }
 
 static Node *node_new(Parser *p, NodeKind kind, int line, int col) {
@@ -114,6 +124,9 @@ static Node *parse_block(Parser *p);
 static Node *parse_stmt(Parser *p);
 static Node *parse_expr(Parser *p);
 static Node *parse_decl(Parser *p);
+static Node *parse_ui_element(Parser *p);
+static Node *parse_ui_property(Parser *p);
+static Node *parse_ui_handler(Parser *p);
 
 /* ── type parsing ──────────────────────────────────────────────────────── */
 
@@ -245,12 +258,16 @@ static Node *parse_primary(Parser *p) {
 
         int   cap      = 8;
         char **patterns = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+        char ***binding_names = arena_alloc(p->arena, (size_t)cap * sizeof(char **));
+        int   *binding_counts = arena_alloc(p->arena, (size_t)cap * sizeof(int));
         Node **values   = arena_alloc(p->arena, (size_t)cap * sizeof(Node *));
         int    count    = 0;
 
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
             char pat[128];
             int  plen = 0;
+            char **arm_bindings = NULL;
+            int binding_count = 0;
             if (match(p, TOK_UNDERSCORE)) {
                 memcpy(pat, "_", 1); plen = 1;
             } else {
@@ -263,6 +280,24 @@ static Node *parse_primary(Parser *p) {
                     plen = en->len < (int)sizeof(pat) - 1 ? en->len : (int)sizeof(pat) - 1;
                     memcpy(pat, en->start, (size_t)plen);
                 }
+
+                if (match(p, TOK_LPAREN)) {
+                    int bind_cap = 4;
+                    arm_bindings = arena_alloc(p->arena, (size_t)bind_cap * sizeof(char *));
+                    while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                        Token *bn = expect(p, TOK_IDENT, "expected binding name in match pattern");
+                        if (binding_count == bind_cap) {
+                            char **nb = arena_alloc(p->arena, (size_t)(bind_cap * 2) * sizeof(char *));
+                            memcpy(nb, arm_bindings, (size_t)binding_count * sizeof(char *));
+                            arm_bindings = nb;
+                            bind_cap *= 2;
+                        }
+                        arm_bindings[binding_count++] = intern(p, bn);
+                        if (!match(p, TOK_COMMA))
+                            break;
+                    }
+                    expect(p, TOK_RPAREN, "expected ')' after match bindings");
+                }
             }
             expect(p, TOK_FAT_ARROW, "expected '=>' in match arm");
             Node *val = parse_expr(p);
@@ -271,12 +306,18 @@ static Node *parse_primary(Parser *p) {
             if (count == cap) {
                 cap *= 2;
                 char **np = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+                char ***nb = arena_alloc(p->arena, (size_t)cap * sizeof(char **));
+                int *nc = arena_alloc(p->arena, (size_t)cap * sizeof(int));
                 Node **nv = arena_alloc(p->arena, (size_t)cap * sizeof(Node *));
                 memcpy(np, patterns, (size_t)count * sizeof(char *));
+                memcpy(nb, binding_names, (size_t)count * sizeof(char **));
+                memcpy(nc, binding_counts, (size_t)count * sizeof(int));
                 memcpy(nv, values,   (size_t)count * sizeof(Node *));
-                patterns = np; values = nv;
+                patterns = np; binding_names = nb; binding_counts = nc; values = nv;
             }
             patterns[count] = arena_strdup(p->arena, pat, plen);
+            binding_names[count] = arm_bindings;
+            binding_counts[count] = binding_count;
             values[count]   = val;
             count++;
         }
@@ -285,6 +326,8 @@ static Node *parse_primary(Parser *p) {
         Node *n = node_new(p, NODE_MATCH, t->line, t->col);
         n->as.match.subject  = subject;
         n->as.match.patterns = patterns;
+        n->as.match.binding_names = binding_names;
+        n->as.match.binding_counts = binding_counts;
         n->as.match.values   = values;
         n->as.match.count    = count;
         return n;
@@ -388,11 +431,37 @@ static Node *parse_postfix(Parser *p) {
         }
         if (match(p, TOK_LBRACKET)) {
             Token *bt  = prev(p);
-            Node  *idx = parse_expr(p);
-            expect(p, TOK_RBRACKET, "expected ']' after index");
-            Node *n = node_new(p, NODE_INDEX, bt->line, bt->col);
-            n->as.index_expr.object = expr;
-            n->as.index_expr.index  = idx;
+            Node *start = NULL;
+            Node *end = NULL;
+            Node *n;
+
+            if (match(p, TOK_DOTDOT)) {
+                if (!check(p, TOK_RBRACKET))
+                    end = parse_expr(p);
+                expect(p, TOK_RBRACKET, "expected ']' after slice");
+                n = node_new(p, NODE_SLICE, bt->line, bt->col);
+                n->as.slice_expr.object = expr;
+                n->as.slice_expr.start = NULL;
+                n->as.slice_expr.end = end;
+                expr = n;
+                continue;
+            }
+
+            start = parse_expr(p);
+            if (match(p, TOK_DOTDOT)) {
+                if (!check(p, TOK_RBRACKET))
+                    end = parse_expr(p);
+                expect(p, TOK_RBRACKET, "expected ']' after slice");
+                n = node_new(p, NODE_SLICE, bt->line, bt->col);
+                n->as.slice_expr.object = expr;
+                n->as.slice_expr.start = start;
+                n->as.slice_expr.end = end;
+            } else {
+                expect(p, TOK_RBRACKET, "expected ']' after index");
+                n = node_new(p, NODE_INDEX, bt->line, bt->col);
+                n->as.index_expr.object = expr;
+                n->as.index_expr.index  = start;
+            }
             expr = n;
             continue;
         }
@@ -606,9 +675,8 @@ static Node *parse_stmt(Parser *p) {
         Node *then_blk  = parse_block(p);
         Node *else_node = NULL;
         if (match(p, TOK_ELSE)) {
-            if (match(p, TOK_IF)) {
-                else_node = parse_stmt(p);
-                /* wrap in NODE_IF already returned above */
+            if (check(p, TOK_IF)) {
+                else_node = parse_stmt(p); /* parse_stmt consumes TOK_IF */
             } else {
                 else_node = parse_block(p);
             }
@@ -738,6 +806,99 @@ static NodeList parse_params(Parser *p) {
     return params;
 }
 
+/* ── UI parsing ────────────────────────────────────────────────────────── */
+
+static Node *parse_ui_property(Parser *p) {
+    Token *t    = cur(p);
+    Token *name = expect(p, TOK_IDENT, "expected property name");
+    expect(p, TOK_COLON, "expected ':' after property name");
+    Node *value = parse_expr(p);
+    expect(p, TOK_SEMICOLON, "expected ';' after property value");
+    Node *n = node_new(p, NODE_UI_PROPERTY, t->line, t->col);
+    n->as.ui_property.name  = intern(p, name);
+    n->as.ui_property.value = value;
+    return n;
+}
+
+static Node *parse_ui_handler(Parser *p) {
+    Token *t = cur(p);
+    int kind;
+    if      (cur_ident_is(p, "onClick"))  { kind = UI_HANDLER_CLICK;  p->pos++; }
+    else if (cur_ident_is(p, "onKey"))    { kind = UI_HANDLER_KEY;    p->pos++; }
+    else if (cur_ident_is(p, "onChange")) { kind = UI_HANDLER_CHANGE; p->pos++; }
+    else {
+        fprintf(stderr, "%s:%d:%d: error: unknown handler (expected onClick/onKey/onChange)\n",
+                p->src_name, t->line, t->col);
+        p->had_error = 1;
+        p->pos++;
+        kind = UI_HANDLER_CLICK;
+    }
+    Node *body = parse_block(p);
+    Node *n = node_new(p, NODE_UI_HANDLER, t->line, t->col);
+    n->as.ui_handler.handler_kind = kind;
+    n->as.ui_handler.body         = body;
+    return n;
+}
+
+static int is_ui_element_ident(Parser *p) {
+    return cur_ident_is(p, "window") || cur_ident_is(p, "button") ||
+           cur_ident_is(p, "label")  || cur_ident_is(p, "input")  ||
+           cur_ident_is(p, "row")    || cur_ident_is(p, "column") ||
+           cur_ident_is(p, "canvas") || cur_ident_is(p, "panel")  ||
+           cur_ident_is(p, "menu");
+}
+
+static Node *parse_ui_element(Parser *p) {
+    Token *t = cur(p);
+    int kind;
+    if      (cur_ident_is(p, "window")) kind = UI_ELEM_WINDOW;
+    else if (cur_ident_is(p, "button")) kind = UI_ELEM_BUTTON;
+    else if (cur_ident_is(p, "label"))  kind = UI_ELEM_LABEL;
+    else if (cur_ident_is(p, "input"))  kind = UI_ELEM_INPUT;
+    else if (cur_ident_is(p, "row"))    kind = UI_ELEM_ROW;
+    else if (cur_ident_is(p, "column")) kind = UI_ELEM_COLUMN;
+    else if (cur_ident_is(p, "canvas")) kind = UI_ELEM_CANVAS;
+    else if (cur_ident_is(p, "panel"))  kind = UI_ELEM_PANEL;
+    else if (cur_ident_is(p, "menu"))   kind = UI_ELEM_MENU;
+    else {
+        fprintf(stderr, "%s:%d:%d: error: unknown UI element '%.*s'\n",
+                p->src_name, t->line, t->col, t->len, t->start);
+        p->had_error = 1;
+        p->pos++;
+        return node_new(p, NODE_LIT_NULL, t->line, t->col);
+    }
+    p->pos++; /* consume element name ident */
+
+    /* optional title string: button("Click me") */
+    char *text = NULL;
+    if (match(p, TOK_LPAREN)) {
+        if (check(p, TOK_STRING)) {
+            text = arena_strdup(p->arena, cur(p)->str_val, (int)strlen(cur(p)->str_val));
+            p->pos++;
+        }
+        expect(p, TOK_RPAREN, "expected ')' after element title");
+    }
+
+    expect(p, TOK_LBRACE, "expected '{' after UI element");
+
+    Node *n = node_new(p, NODE_UI_ELEMENT, t->line, t->col);
+    n->as.ui_element.elem_kind = kind;
+    n->as.ui_element.text      = text;
+
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        if (cur_ident_is(p, "onClick") || cur_ident_is(p, "onKey") ||
+            cur_ident_is(p, "onChange")) {
+            nodelist_push(p, &n->as.ui_element.handlers, parse_ui_handler(p));
+        } else if (is_ui_element_ident(p)) {
+            nodelist_push(p, &n->as.ui_element.children, parse_ui_element(p));
+        } else {
+            nodelist_push(p, &n->as.ui_element.properties, parse_ui_property(p));
+        }
+    }
+    expect(p, TOK_RBRACE, "expected '}' after UI element body");
+    return n;
+}
+
 /* ── declaration parsing ───────────────────────────────────────────────── */
 
 static Node *parse_fn_decl(Parser *p, int is_public, char *owner_type) {
@@ -751,6 +912,7 @@ static Node *parse_fn_decl(Parser *p, int is_public, char *owner_type) {
     Node *n = node_new(p, NODE_FN_DECL, t->line, t->col);
     n->as.fn.name       = intern(p, name);
     n->as.fn.owner_type = owner_type;
+    n->as.fn.package_name = p->current_package;
     n->as.fn.params     = params;
     n->as.fn.ret_type   = ret;
     n->as.fn.body       = body;
@@ -780,6 +942,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after impl block");
         Node *n = node_new(p, NODE_IMPL_DECL, t->line, t->col);
         n->as.impl.target         = intern(p, target);
+        n->as.impl.package_name   = p->current_package;
         n->as.impl.interface_name = iface_name;
         n->as.impl.methods        = methods;
         return n;
@@ -801,6 +964,7 @@ static Node *parse_decl(Parser *p) {
             Node *m = node_new(p, NODE_FN_DECL, fn_tok->line, fn_tok->col);
             m->as.fn.name       = intern(p, mname);
             m->as.fn.owner_type = NULL;
+            m->as.fn.package_name = p->current_package;
             m->as.fn.params     = params;
             m->as.fn.ret_type   = ret;
             m->as.fn.body       = NULL;
@@ -810,6 +974,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after interface");
         Node *n = node_new(p, NODE_INTERFACE_DECL, t->line, t->col);
         n->as.interface_decl.name      = intern(p, name);
+        n->as.interface_decl.package_name = p->current_package;
         n->as.interface_decl.methods   = methods;
         n->as.interface_decl.is_public = is_public;
         return n;
@@ -834,6 +999,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after packed struct");
         Node *n = node_new(p, NODE_STRUCT_DECL, t->line, t->col);
         n->as.struct_decl.name      = intern(p, name);
+        n->as.struct_decl.package_name = p->current_package;
         n->as.struct_decl.fields    = fields;
         n->as.struct_decl.is_public = is_public;
         n->as.struct_decl.is_packed = 1;
@@ -857,6 +1023,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after struct");
         Node *n = node_new(p, NODE_STRUCT_DECL, t->line, t->col);
         n->as.struct_decl.name      = intern(p, name);
+        n->as.struct_decl.package_name = p->current_package;
         n->as.struct_decl.fields    = fields;
         n->as.struct_decl.is_public = is_public;
         return n;
@@ -901,6 +1068,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after enum");
         Node *n = node_new(p, NODE_ENUM_DECL, t->line, t->col);
         n->as.enum_decl.name           = intern(p, name);
+        n->as.enum_decl.package_name   = p->current_package;
         n->as.enum_decl.variants       = variants;
         n->as.enum_decl.variant_fields = vfields;
         n->as.enum_decl.count          = count;
@@ -925,6 +1093,7 @@ static Node *parse_decl(Parser *p) {
         expect(p, TOK_RBRACE, "expected '}' after union");
         Node *n = node_new(p, NODE_UNION_DECL, t->line, t->col);
         n->as.union_decl.name      = intern(p, name);
+        n->as.union_decl.package_name = p->current_package;
         n->as.union_decl.fields    = fields;
         n->as.union_decl.is_public = is_public;
         return n;
@@ -946,6 +1115,7 @@ static Node *parse_decl(Parser *p) {
 
         Node *n = node_new(p, NODE_EXTERN_FN, t->line, t->col);
         n->as.extern_fn.name         = intern(p, name);
+        n->as.extern_fn.package_name = p->current_package;
         n->as.extern_fn.calling_conv = conv;
         n->as.extern_fn.params       = params;
         n->as.extern_fn.ret_type     = ret;
@@ -955,6 +1125,22 @@ static Node *parse_decl(Parser *p) {
 
     if (match(p, TOK_FN)) {
         return parse_fn_decl(p, is_public, NULL);
+    }
+
+    if (match(p, TOK_UI)) {
+        expect(p, TOK_APP, "expected 'app' after 'ui'");
+        Token *name = expect(p, TOK_IDENT, "expected app name after 'ui app'");
+        expect(p, TOK_LBRACE, "expected '{' after app name");
+        NodeList children = {0};
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF))
+            nodelist_push(p, &children, parse_ui_element(p));
+        expect(p, TOK_RBRACE, "expected '}' after ui app body");
+        Node *n = node_new(p, NODE_UI_APP, t->line, t->col);
+        n->as.ui_app.name         = intern(p, name);
+        n->as.ui_app.package_name = p->current_package;
+        n->as.ui_app.children     = children;
+        n->as.ui_app.is_public    = is_public;
+        return n;
     }
 
     fprintf(stderr, "%s:%d:%d: error: unexpected token '%s' at top level\n",
@@ -991,6 +1177,7 @@ Node *parser_parse(TokenList *tl, const char *source_name, Arena *arena) {
         Node *pkg = node_new(&p, NODE_PACKAGE, t->line, t->col);
         pkg->as.pkg.path      = arena_strdup(arena, buf, blen);
         prog->as.program.package = pkg;
+        p.current_package = pkg->as.pkg.path;
     }
 
     /* import declarations */

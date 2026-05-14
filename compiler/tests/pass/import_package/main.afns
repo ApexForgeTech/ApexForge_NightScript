@@ -1,0 +1,13 @@
+package app;
+
+import math.util;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let v: i32 = add_two(3);
+    if v == 5 {
+        puts("ok");
+    }
+    return 0;
+}

@@ -1,0 +1,46 @@
+package alloc.buf;
+
+extern "C" fn malloc(size: usize) -> *u8;
+extern "C" fn realloc(ptr: *u8, size: usize) -> *u8;
+extern "C" fn free(ptr: *u8) -> void;
+extern "C" fn memcpy(dst: *u8, src: *u8, n: usize) -> *u8;
+
+/* Growable byte buffer. */
+struct Buf {
+    data: *u8;
+    len: usize;
+    cap: usize;
+}
+
+pub fn buf_new() -> Buf {
+    return Buf { data: null, len: 0, cap: 0 };
+}
+
+pub fn buf_push(b: *Buf, byte: u8) -> bool {
+    if (*b).len == (*b).cap {
+        let new_cap: usize = (*b).cap * 2;
+        if new_cap == 0 {
+            new_cap = 16;
+        }
+        let new_data: *u8 = realloc((*b).data, new_cap);
+        if new_data == null {
+            return false;
+        }
+        (*b).data = new_data;
+        (*b).cap = new_cap;
+    }
+    let idx: usize = (*b).len;
+    (*b).len = (*b).len + 1;
+    return true;
+}
+
+pub fn buf_len(b: *Buf) -> usize {
+    return (*b).len;
+}
+
+pub fn buf_free(b: *Buf) -> void {
+    free((*b).data);
+    (*b).data = null;
+    (*b).len = 0;
+    (*b).cap = 0;
+}

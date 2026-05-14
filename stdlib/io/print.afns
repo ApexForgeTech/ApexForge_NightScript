@@ -1,0 +1,26 @@
+package io.print;
+
+extern "C" fn printf(fmt: str) -> i32;
+extern "C" fn putchar(c: i32) -> i32;
+extern "C" fn puts(s: str) -> i32;
+extern "C" fn fflush(stream: *u8) -> i32;
+
+pub fn print(s: str) -> void {
+    puts(s);
+}
+
+pub fn print_i32(x: i32) -> void {
+    printf("%d\n");
+}
+
+pub fn print_bool(b: bool) -> void {
+    if b {
+        puts("true");
+    } else {
+        puts("false");
+    }
+}
+
+pub fn newline() -> void {
+    putchar(10);
+}

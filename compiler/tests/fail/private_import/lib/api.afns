@@ -1,0 +1,9 @@
+package lib.api;
+
+fn hidden() -> i32 {
+    return 7;
+}
+
+pub fn shown() -> i32 {
+    return hidden();
+}

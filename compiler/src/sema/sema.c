@@ -252,7 +252,7 @@ static int is_builtin_type(const char *name) {
         "u8", "u16", "u32", "u64", "usize",
         "f32", "f64",
         "bool", "char", "void", "never",
-        "str", "cstr",
+        "str", "String", "cstr",
         NULL
     };
 
@@ -752,6 +752,11 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
             return analyze_expr(a, scope, expr->as.index_expr.object) &&
                    analyze_expr(a, scope, expr->as.index_expr.index);
 
+        case NODE_SLICE:
+            return analyze_expr(a, scope, expr->as.slice_expr.object) &&
+                   (!expr->as.slice_expr.start || analyze_expr(a, scope, expr->as.slice_expr.start)) &&
+                   (!expr->as.slice_expr.end || analyze_expr(a, scope, expr->as.slice_expr.end));
+
         case NODE_CALL:
             if (expr->as.call.callee &&
                 expr->as.call.callee->kind == NODE_IDENT &&
@@ -834,10 +839,26 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
             if (!analyze_expr(a, scope, expr->as.match.subject))
                 return 0;
             for (int i = 0; i < expr->as.match.count; i++) {
-                if (!analyze_match_pattern(a, expr->as.match.patterns[i], expr->line, expr->col) ||
-                    !analyze_expr(a, scope, expr->as.match.values[i])) {
+                Scope *arm_scope;
+                if (!analyze_match_pattern(a, expr->as.match.patterns[i], expr->line, expr->col))
+                    return 0;
+                arm_scope = scope_new(scope);
+                if (!arm_scope)
+                    return 0;
+                for (int j = 0; j < expr->as.match.binding_counts[i]; j++) {
+                    const char *name = expr->as.match.binding_names[i][j];
+                    if (!scope_define(arm_scope, name, expr)) {
+                        sema_error(a, expr->line, expr->col,
+                                   "duplicate match binding '%s'", name);
+                        scope_free(arm_scope);
+                        return 0;
+                    }
+                }
+                if (!analyze_expr(a, arm_scope, expr->as.match.values[i])) {
+                    scope_free(arm_scope);
                     return 0;
                 }
+                scope_free(arm_scope);
             }
             return 1;
 

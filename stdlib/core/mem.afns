@@ -1,0 +1,29 @@
+package core.mem;
+
+extern "C" fn memcpy(dst: *u8, src: *u8, n: usize) -> *u8;
+extern "C" fn memmove(dst: *u8, src: *u8, n: usize) -> *u8;
+extern "C" fn memset(ptr: *u8, val: i32, n: usize) -> *u8;
+extern "C" fn memcmp(a: *u8, b: *u8, n: usize) -> i32;
+extern "C" fn malloc(size: usize) -> *u8;
+extern "C" fn realloc(ptr: *u8, size: usize) -> *u8;
+extern "C" fn free(ptr: *u8) -> void;
+
+pub fn copy(dst: *u8, src: *u8, n: usize) -> void {
+    memcpy(dst, src, n);
+}
+
+pub fn zero(ptr: *u8, n: usize) -> void {
+    memset(ptr, 0, n);
+}
+
+pub fn alloc(size: usize) -> *u8 {
+    return malloc(size);
+}
+
+pub fn dealloc(ptr: *u8) -> void {
+    free(ptr);
+}
+
+pub fn resize(ptr: *u8, new_size: usize) -> *u8 {
+    return realloc(ptr, new_size);
+}

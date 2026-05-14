@@ -1,0 +1,15 @@
+package test;
+
+enum Event {
+    Click(x: i32, y: i32);
+    None;
+}
+
+fn main() -> i32 {
+    let e: Event = Event.None;
+    let v: i32 = match e {
+        Event.Click(x) => x,
+        Event.None => 0,
+    };
+    return v;
+}

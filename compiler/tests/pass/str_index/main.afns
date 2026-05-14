@@ -1,0 +1,15 @@
+package test;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    let s: str = "hello";
+    let first: u8 = s[0];
+    let second: u8 = s[1];
+
+    if first == 104 && second == 101 {
+        puts("ok");
+    }
+
+    return 0;
+}

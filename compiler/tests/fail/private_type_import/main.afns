@@ -1,0 +1,8 @@
+package app;
+
+import lib.api;
+
+fn main() -> i32 {
+    let value = make();
+    return 0;
+}

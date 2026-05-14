@@ -1,0 +1,23 @@
+package test;
+
+pub extern "C" fn puts(s: cstr) -> i32;
+
+pub fn foo() -> i32 {
+    return 1;
+}
+
+pub struct Box {
+    value: i32;
+}
+
+pub enum Color {
+    Red;
+}
+
+pub union Bits {
+    value: u32;
+}
+
+fn main() -> i32 {
+    return foo();
+}
