@@ -1,0 +1,8 @@
+# Treat NightScript source files as Rust on GitHub until a native
+# Linguist language definition is available for .afns.
+*.afns linguist-language=Rust
+
+# Keep repository language stats focused on source code.
+docs/** linguist-documentation
+compiler/build/** linguist-generated
+**/*.generated.c linguist-generated
