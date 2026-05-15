@@ -8,56 +8,71 @@ extern fn ns_term_init(tidx: i32, widx: i32, fg: u32, bg: u32) -> void;
 extern fn ns_term_putch(tidx: i32, c: u8) -> void;
 extern fn ns_term_puts(tidx: i32, s: cstr) -> void;
 extern fn ns_term_render(tidx: i32) -> void;
+extern fn ns_term_scroll_up(tidx: i32, n: i32) -> void;
+extern fn ns_term_scroll_down(tidx: i32, n: i32) -> void;
 
 // ── Terminal lifecycle ────────────────────────────────────────────────────────
 
 // Initialize terminal tidx and bind it to window widx.
-// fg and bg are 32-bit ARGB colors for text and background.
+// fg / bg: 32-bit ARGB colors for text foreground and background.
 pub fn init(tidx: i32, widx: i32, fg: u32, bg: u32) -> void {
     ns_term_init(tidx, widx, fg, bg);
 }
 
 // ── Output ────────────────────────────────────────────────────────────────────
 
-// Write a single ASCII character to the terminal.
-// Handles '\n' (newline + scroll), '\r' (carriage return), '\b' (backspace).
+// Write a single ASCII character. Handles '\n', '\r', '\b'.
 pub fn putch(tidx: i32, c: u8) -> void { ns_term_putch(tidx, c); }
 
-// Write a null-terminated string to the terminal.
+// Write a null-terminated string.
 pub fn puts(tidx: i32, s: cstr) -> void { ns_term_puts(tidx, s); }
 
-// Write a newline sequence (\r\n) to the terminal.
+// Write CRLF.
 pub fn newline(tidx: i32) -> void {
     ns_term_putch(tidx, 13);
     ns_term_putch(tidx, 10);
 }
 
-// Write a null-terminated string followed by newline.
+// Write a string followed by CRLF.
 pub fn puts_ln(tidx: i32, s: cstr) -> void {
     ns_term_puts(tidx, s);
     newline(tidx);
 }
 
+// ── Scrollback ────────────────────────────────────────────────────────────────
+
+// Scroll the view up by n lines (shows older history).
+// The "[SCROLL]" indicator appears when not at the bottom.
+pub fn scroll_up(tidx: i32, n: i32) -> void   { ns_term_scroll_up(tidx, n); }
+
+// Scroll the view down by n lines (toward current output).
+pub fn scroll_down(tidx: i32, n: i32) -> void { ns_term_scroll_down(tidx, n); }
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
-// Redraw the terminal text buffer and cursor bar into its bound window.
-// Call this once per frame, after ns_wm_render().
+// Redraw the visible rows, cursor bar, and scrollback indicator.
+// Call after ns_wm_render() each frame.
 pub fn render(tidx: i32) -> void { ns_term_render(tidx); }
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
-const COLS: i32 = 64;    // characters per row
-const ROWS: i32 = 22;    // visible rows
-const MAX:  i32 = 4;     // maximum simultaneous terminals
-const CHAR_W: i32 = 9;   // pixel width per character (8×8 font + 1 gap)
-const CHAR_H: i32 = 10;  // pixel height per character (8 + 2 gap)
+const COLS:   i32 = 64;   // visible characters per row
+const ROWS:   i32 = 22;   // visible rows on screen
+const SCROLL: i32 = 200;  // scrollback history depth (lines)
+const MAX:    i32 = 4;    // maximum simultaneous terminal instances
+const CHAR_W: i32 = 9;    // pixel width per character (8×8 font + 1px gap)
+const CHAR_H: i32 = 10;   // pixel height per character (8 + 2px gap)
 
-// ── Common color pairs ────────────────────────────────────────────────────────
+// ── Common foreground color presets ──────────────────────────────────────────
 
-const FG_GREEN:  u32 = 0x0000FF44;   // bright green on black — classic terminal
-const BG_BLACK:  u32 = 0x00000000;
-const FG_WHITE:  u32 = 0x00FFFFFF;
-const FG_AMBER:  u32 = 0x00FFAA00;   // amber monochrome style
-const BG_NAVY:   u32 = 0x00001040;
-const FG_CYAN:   u32 = 0x0000FFFF;
-const FG_YELLOW: u32 = 0x00FFFF00;
+const FG_GREEN:   u32 = 0x0000FF44;  // classic green-on-black terminal
+const FG_WHITE:   u32 = 0x00FFFFFF;
+const FG_AMBER:   u32 = 0x00FFAA00;  // amber monochrome style
+const FG_CYAN:    u32 = 0x0000FFFF;
+const FG_YELLOW:  u32 = 0x00FFFF00;
+const FG_BLUE:    u32 = 0x0080C0FF;  // soft blue accent
+const FG_MAGENTA: u32 = 0x00FF80FF;
+const FG_RED:     u32 = 0x00FF6060;
+const BG_BLACK:   u32 = 0x00000000;
+const BG_NAVY:    u32 = 0x00001040;
+const BG_DARK:    u32 = 0x00181820;  // matches NS_C_BODY

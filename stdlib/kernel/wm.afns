@@ -14,31 +14,52 @@ extern fn ns_win_x(idx: i32) -> i32;
 extern fn ns_win_y(idx: i32) -> i32;
 extern fn ns_win_w(idx: i32) -> i32;
 extern fn ns_win_h(idx: i32) -> i32;
+// draw_button: state = NS_BTN_NORMAL(0), NS_BTN_HOVER(1), NS_BTN_PRESSED(2)
+extern fn ns_wm_draw_button(x: i32, y: i32, w: i32, h: i32, text: cstr, state: u8) -> void;
+extern fn ns_wm_button_hit(x: i32, y: i32, w: i32, h: i32, mx: i32, my: i32) -> i32;
+extern fn ns_wm_button_state(x: i32, y: i32, w: i32, h: i32) -> u8;
+extern fn ns_unmask_irq(irq: u8) -> void;
+extern fn ns_mask_irq(irq: u8) -> void;
 
 // ── Window Manager lifecycle ──────────────────────────────────────────────────
 
 // Initialize the window manager (clear window list, reset focus/drag state).
-// Must be called before any ns_wm_create().
 pub fn init() -> void { ns_wm_init(); }
 
-// Create a new window. Returns its window index (0-based), or -1 if the
-// maximum number of windows (8) has been reached.
+// Create a new window. Returns its window index (0-based), or -1 if full (max 8).
 //   title — null-terminated title bar text
-//   x, y  — top-left corner of the window body (excluding title bar)
+//   x, y  — top-left corner of the window body (below the title bar)
 //   w, h  — width and height of the window body
 pub fn create(title: cstr, x: i32, y: i32, w: i32, h: i32) -> i32 {
     return ns_wm_create(title, x, y, w, h);
 }
 
-// Redraw the desktop background, taskbar, and all windows (unfocused first,
-// then the focused window on top). Does not draw the mouse cursor.
+// Redraw desktop, taskbar clock, and all windows (back-to-front). No cursor.
 pub fn render() -> void { ns_wm_render(); }
 
-// Process a mouse event: update focus, handle dragging, detect close clicks.
-//   mx, my — current mouse coordinates (from mouse.x() and mouse.y())
-//   btn    — current button state (from mouse.buttons())
+// Process a mouse event: focus, drag, close, button interaction.
 pub fn on_mouse(mx: i32, my: i32, btn: u8) -> void {
     ns_wm_handle_mouse(mx, my, btn);
+}
+
+// ── Button drawing (roadmap 6.1 requirement) ──────────────────────────────────
+
+// Draw a button with visual state.
+// state: BTN_NORMAL=0, BTN_HOVER=1, BTN_PRESSED=2.
+// Includes drop shadow, colored border, centered label text.
+pub fn draw_button(x: i32, y: i32, w: i32, h: i32, text: cstr, state: u8) -> void {
+    ns_wm_draw_button(x, y, w, h, text, state);
+}
+
+// Returns 1 if (mx,my) is inside the button rectangle, 0 otherwise.
+pub fn button_hit(x: i32, y: i32, w: i32, h: i32, mx: i32, my: i32) -> bool {
+    return ns_wm_button_hit(x, y, w, h, mx, my) != 0;
+}
+
+// Returns the button's visual state based on current mouse position + button.
+// Automatically detects hover and pressed states.
+pub fn button_state(x: i32, y: i32, w: i32, h: i32) -> u8 {
+    return ns_wm_button_state(x, y, w, h);
 }
 
 // ── Window property queries ───────────────────────────────────────────────────
@@ -58,6 +79,11 @@ const CLOSE_BTN_W:     i32 = 16;    // width of the close button
 const TASKBAR_HEIGHT:  i32 = 24;    // taskbar at the bottom of the screen
 const MAX_WINDOWS:     i32 = 8;     // maximum number of simultaneous windows
 
+// Button state constants (match NS_BTN_* in the runtime)
+const BTN_NORMAL:  u8 = 0;          // default appearance
+const BTN_HOVER:   u8 = 1;          // mouse is over button
+const BTN_PRESSED: u8 = 2;          // left button held down
+
 // ── Desktop color palette ─────────────────────────────────────────────────────
 
 const COLOR_DESKTOP:      u32 = 0x00203050;
@@ -69,3 +95,7 @@ const COLOR_BODY:         u32 = 0x00181820;
 const COLOR_CLOSE_BTN:    u32 = 0x00CC2222;
 const COLOR_TXT_WHITE:    u32 = 0x00FFFFFF;
 const COLOR_TXT_ACCENT:   u32 = 0x0080C0FF;
+const COLOR_BTN_BORDER:   u32 = 0x006090D0;
+const COLOR_BTN_NORMAL:   u32 = 0x00304060;
+const COLOR_BTN_HOVER:    u32 = 0x004080C0;
+const COLOR_BTN_PRESSED:  u32 = 0x001030A0;

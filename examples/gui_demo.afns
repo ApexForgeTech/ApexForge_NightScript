@@ -1,0 +1,35 @@
+package examples.guidemo;
+
+ui app GuiDemo {
+    window("NightScript GUI Demo") {
+        width: 720;
+        height: 420;
+
+        label("ApexForge NightScript SDL2 UI test") {}
+        label("Bu pencere kernel deyil, host sistemde acilan native UI-dir.") {}
+
+        row {
+            button("Salam") {
+                onClick {
+                    let clicked: i32 = 1;
+                }
+            }
+
+            button("Bagla") {
+                onClick {
+                    let closing: i32 = 1;
+                }
+            }
+        }
+
+        input("Burada yaza bilersen...") {
+            onChange {
+                let changed: i32 = 1;
+            }
+
+            onKey {
+                let key_pressed: i32 = 1;
+            }
+        }
+    }
+}

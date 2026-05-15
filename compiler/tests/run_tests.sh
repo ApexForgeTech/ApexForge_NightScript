@@ -1062,7 +1062,7 @@ assert_contains "$TMP_DIR/stdout" "ns_term_init"    "terminal init present"
 assert_contains "$TMP_DIR/stdout" "ns_term_putch"   "terminal putchar present"
 assert_contains "$TMP_DIR/stdout" "ns_term_puts"    "terminal puts present"
 assert_contains "$TMP_DIR/stdout" "ns_term_render"  "terminal render present"
-assert_contains "$TMP_DIR/stdout" "_ns_term_scroll" "terminal scroll present"
+assert_contains "$TMP_DIR/stdout" "ns_term_scroll_up" "terminal scroll present"
 assert_contains "$TMP_DIR/stdout" "NS_TERM_COLS"    "terminal cols constant present"
 assert_contains "$TMP_DIR/stdout" "NS_TERM_ROWS"    "terminal rows constant present"
 printf 'ok 147 - v0.6 kernel runtime: terminal emulator present\n'
