@@ -1,0 +1,90 @@
+package kernel.mouse;
+
+// PS/2 Mouse driver (IRQ 12).
+// The kernel runtime (emitted by codegen v0.6) provides the ns_mouse_* helpers
+// and the full 3-byte packet state machine ISR.
+
+extern fn ns_mouse_init() -> void;
+extern fn ns_mouse_x() -> i32;
+extern fn ns_mouse_y() -> i32;
+extern fn ns_mouse_buttons() -> u8;
+extern fn ns_mouse_left() -> u8;
+extern fn ns_mouse_right() -> u8;
+extern fn ns_mouse_middle() -> u8;
+extern fn ns_draw_cursor(x: i32, y: i32) -> void;
+extern fn ns_unmask_irq(irq: u8) -> void;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Initialize the PS/2 auxiliary port, enable streaming, and register IRQ 12.
+// Call after ns_interrupts_init() with interrupts enabled.
+pub fn init() -> void    { ns_mouse_init(); }
+
+// Current cursor X position (pixels, 0-based, clamped to framebuffer width).
+pub fn x() -> i32        { return ns_mouse_x(); }
+
+// Current cursor Y position (pixels, 0-based, clamped to framebuffer height).
+pub fn y() -> i32        { return ns_mouse_y(); }
+
+// Raw 3-bit button state: bit0=left, bit1=right, bit2=middle.
+pub fn buttons() -> u8   { return ns_mouse_buttons(); }
+
+// True if the left mouse button is currently pressed.
+pub fn left_down() -> bool  { return ns_mouse_left() != 0; }
+
+// True if the right mouse button is currently pressed.
+pub fn right_down() -> bool { return ns_mouse_right() != 0; }
+
+// True if the middle mouse button is currently pressed.
+pub fn mid_down() -> bool   { return ns_mouse_middle() != 0; }
+
+// Draw the hardware mouse cursor at its current position.
+pub fn draw_cursor() -> void { ns_draw_cursor(ns_mouse_x(), ns_mouse_y()); }
+
+// True if the cursor is inside the rectangle (rx, ry, rw, rh).
+pub fn in_rect(rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
+    let mx: i32 = ns_mouse_x();
+    let my: i32 = ns_mouse_y();
+    return mx >= rx && mx < rx + rw && my >= ry && my < ry + rh;
+}
+
+// ── Button state constants ────────────────────────────────────────────────────
+
+const BTN_LEFT:   u8 = 0x01;
+const BTN_RIGHT:  u8 = 0x02;
+const BTN_MIDDLE: u8 = 0x04;
+
+// ── PS/2 controller port addresses ───────────────────────────────────────────
+
+const PS2_DATA:   u16 = 0x0060;
+const PS2_STATUS: u16 = 0x0064;
+const PS2_CMD:    u16 = 0x0064;
+
+// PS/2 Status Register bits
+const PS2_OUTPUT_FULL: u8 = 0x01;  // output buffer full (data ready to read)
+const PS2_INPUT_FULL:  u8 = 0x02;  // input buffer full  (busy, do not write)
+const PS2_AUX_DATA:    u8 = 0x20;  // data came from aux (mouse) port
+
+// PS/2 Controller commands
+const PS2_ENABLE_AUX:    u8 = 0xA8;
+const PS2_READ_CONFIG:   u8 = 0x20;
+const PS2_WRITE_CONFIG:  u8 = 0x60;
+const PS2_WRITE_AUX:     u8 = 0xD4;
+
+// Mouse commands
+const MOUSE_RESET:       u8 = 0xFF;
+const MOUSE_DEFAULTS:    u8 = 0xF6;
+const MOUSE_ENABLE:      u8 = 0xF4;
+const MOUSE_DISABLE:     u8 = 0xF5;
+const MOUSE_SAMPLE_RATE: u8 = 0xF3;
+const MOUSE_ACK:         u8 = 0xFA;
+
+// Packet byte 0 bit masks
+const PKT_BTN_LEFT:   u8 = 0x01;
+const PKT_BTN_RIGHT:  u8 = 0x02;
+const PKT_BTN_MID:    u8 = 0x04;
+const PKT_ALWAYS1:    u8 = 0x08;  // must be 1 for valid first byte
+const PKT_X_SIGN:     u8 = 0x10;
+const PKT_Y_SIGN:     u8 = 0x20;
+const PKT_X_OVERFLOW: u8 = 0x40;
+const PKT_Y_OVERFLOW: u8 = 0x80;

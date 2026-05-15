@@ -1,0 +1,105 @@
+package kernel.ports;
+
+// x86 port I/O — uses compiler built-ins (inb/outb/inw/outw/inl/outl/io_wait)
+// which are lowered to __asm__ volatile IN/OUT instructions by codegen.
+
+// ── Typed port read/write ─────────────────────────────────────────────────────
+
+pub fn read8(port: u16) -> u8    { return inb(port); }
+pub fn write8(port: u16, val: u8) -> void   { outb(port, val); }
+
+pub fn read16(port: u16) -> u16  { return inw(port); }
+pub fn write16(port: u16, val: u16) -> void { outw(port, val); }
+
+pub fn read32(port: u16) -> u32  { return inl(port); }
+pub fn write32(port: u16, val: u32) -> void { outl(port, val); }
+
+// Short I/O delay via the POST diagnostic port (0x80).
+pub fn wait() -> void { io_wait(); }
+
+// Two back-to-back I/O delays — useful for slow ISA devices.
+pub fn wait2() -> void { io_wait(); io_wait(); }
+
+// ── PIC (8259A) port addresses ────────────────────────────────────────────────
+
+const PIC1_CMD:  u16 = 0x0020;
+const PIC1_DATA: u16 = 0x0021;
+const PIC2_CMD:  u16 = 0x00A0;
+const PIC2_DATA: u16 = 0x00A1;
+
+// ── PIT (8253/8254) port addresses ───────────────────────────────────────────
+
+const PIT_CH0:   u16 = 0x0040;   // channel 0 data
+const PIT_CH1:   u16 = 0x0041;   // channel 1 data (DRAM refresh — mostly unused)
+const PIT_CH2:   u16 = 0x0042;   // channel 2 data (PC speaker)
+const PIT_CMD:   u16 = 0x0043;   // mode/command register
+
+// ── PS/2 controller port addresses ───────────────────────────────────────────
+
+const PS2_DATA:  u16 = 0x0060;   // data port (r/w)
+const PS2_STATUS: u16 = 0x0064;  // status register (r)
+const PS2_CMD:   u16 = 0x0064;   // command register (w)
+
+// ── Serial (UART 16550) base addresses ───────────────────────────────────────
+
+const COM1_BASE: u16 = 0x03F8;
+const COM2_BASE: u16 = 0x02F8;
+const COM3_BASE: u16 = 0x03E8;
+const COM4_BASE: u16 = 0x02E8;
+
+// UART register offsets from base address
+const UART_DATA:  u16 = 0;   // Data register (r/w)
+const UART_IER:   u16 = 1;   // Interrupt enable
+const UART_FCR:   u16 = 2;   // FIFO control (w) / IIR (r)
+const UART_LCR:   u16 = 3;   // Line control
+const UART_MCR:   u16 = 4;   // Modem control
+const UART_LSR:   u16 = 5;   // Line status
+const UART_MSR:   u16 = 6;   // Modem status
+const UART_SCRATCH: u16 = 7; // Scratch register
+
+// UART LSR bits
+const UART_LSR_DR:   u8 = 0x01;  // data ready
+const UART_LSR_THRE: u8 = 0x20;  // transmitter holding register empty
+
+// ── VGA text-mode port addresses ─────────────────────────────────────────────
+
+const VGA_CRTC_ADDR: u16 = 0x03D4;
+const VGA_CRTC_DATA: u16 = 0x03D5;
+const VGA_MISC_READ: u16 = 0x03CC;
+const VGA_MISC_WRITE: u16 = 0x03C2;
+
+// ── DMA controller port addresses ────────────────────────────────────────────
+
+const DMA1_STATUS:  u16 = 0x0008;
+const DMA1_CMD:     u16 = 0x0008;
+const DMA1_MASK:    u16 = 0x000F;
+
+// ── ATA / IDE primary / secondary ────────────────────────────────────────────
+
+const ATA_PRIMARY_DATA:    u16 = 0x01F0;
+const ATA_PRIMARY_STATUS:  u16 = 0x01F7;
+const ATA_PRIMARY_CTRL:    u16 = 0x03F6;
+const ATA_SECONDARY_DATA:  u16 = 0x0170;
+const ATA_SECONDARY_STATUS: u16 = 0x0177;
+const ATA_SECONDARY_CTRL:  u16 = 0x0376;
+
+// ── CMOS / RTC port addresses ─────────────────────────────────────────────────
+
+const CMOS_ADDR: u16 = 0x0070;
+const CMOS_DATA: u16 = 0x0071;
+
+// ── Composite helpers ─────────────────────────────────────────────────────────
+
+// Read the PS/2 controller status byte.
+pub fn ps2_status() -> u8    { return read8(PS2_STATUS); }
+
+// True if the PS/2 output buffer is full (a byte is waiting to be read).
+pub fn ps2_output_full() -> bool { return (ps2_status() & 0x01) != 0; }
+
+// True if the PS/2 input buffer is empty (safe to write a command).
+pub fn ps2_input_empty() -> bool { return (ps2_status() & 0x02) == 0; }
+
+// Send an end-of-interrupt to PIC1 directly via port I/O.
+pub fn pic1_eoi() -> void { write8(PIC1_CMD, 0x20); }
+// Send EOI to both PICs (for IRQ 8–15).
+pub fn pic2_eoi() -> void { write8(PIC2_CMD, 0x20); write8(PIC1_CMD, 0x20); }

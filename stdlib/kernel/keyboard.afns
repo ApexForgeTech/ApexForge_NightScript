@@ -1,0 +1,99 @@
+package kernel.keyboard;
+
+// PS/2 Keyboard driver (IRQ 1).
+// The kernel runtime (emitted by codegen) handles the ISR and ASCII lookup table.
+
+extern fn ns_keyboard_init() -> void;
+extern fn ns_keyboard_on_key(handler: *u8) -> void;
+extern fn ns_keyboard_to_ascii(scancode: u8) -> u8;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Initialize the PS/2 keyboard: register the IRQ1 handler.
+pub fn init() -> void { ns_keyboard_init(); }
+
+// Convert a PS/2 make-code scancode to its ASCII character.
+// Returns 0 for non-printable keys or key-release codes.
+pub fn to_ascii(scancode: u8) -> u8 { return ns_keyboard_to_ascii(scancode); }
+
+// True if scancode is a break (key-release) code (bit 7 set).
+pub fn is_release(sc: u8) -> bool { return sc >= 0x80; }
+
+// Strip the break-code bit to get the base make code.
+pub fn make_code(sc: u8) -> u8 { return sc & 0x7F; }
+
+// ── Scancode constants (make codes; add 0x80 for break codes) ─────────────────
+
+// Control keys
+const KEY_ESC:       u8 = 0x01;
+const KEY_BACKSPACE: u8 = 0x0E;
+const KEY_TAB:       u8 = 0x0F;
+const KEY_ENTER:     u8 = 0x1C;
+const KEY_LCTRL:     u8 = 0x1D;
+const KEY_RCTRL:     u8 = 0x1D;  // same code as LCTRL in basic set-1
+const KEY_LSHIFT:    u8 = 0x2A;
+const KEY_RSHIFT:    u8 = 0x36;
+const KEY_LALT:      u8 = 0x38;
+const KEY_SPACE:     u8 = 0x39;
+const KEY_CAPS:      u8 = 0x3A;
+const KEY_NUMLOCK:   u8 = 0x45;
+const KEY_SCROLLLOCK: u8 = 0x46;
+
+// Function keys
+const KEY_F1:  u8 = 0x3B;
+const KEY_F2:  u8 = 0x3C;
+const KEY_F3:  u8 = 0x3D;
+const KEY_F4:  u8 = 0x3E;
+const KEY_F5:  u8 = 0x3F;
+const KEY_F6:  u8 = 0x40;
+const KEY_F7:  u8 = 0x41;
+const KEY_F8:  u8 = 0x42;
+const KEY_F9:  u8 = 0x43;
+const KEY_F10: u8 = 0x44;
+const KEY_F11: u8 = 0x57;
+const KEY_F12: u8 = 0x58;
+
+// Navigation / editing
+const KEY_HOME:   u8 = 0x47;
+const KEY_UP:     u8 = 0x48;
+const KEY_PGUP:   u8 = 0x49;
+const KEY_LEFT:   u8 = 0x4B;
+const KEY_RIGHT:  u8 = 0x4D;
+const KEY_END:    u8 = 0x4F;
+const KEY_DOWN:   u8 = 0x50;
+const KEY_PGDN:   u8 = 0x51;
+const KEY_INSERT: u8 = 0x52;
+const KEY_DELETE: u8 = 0x53;
+
+// Numpad
+const KEY_NUM7:   u8 = 0x47;   // same codes as home/up/pgup/…
+const KEY_NUM8:   u8 = 0x48;
+const KEY_NUM9:   u8 = 0x49;
+const KEY_NUM4:   u8 = 0x4B;
+const KEY_NUM5:   u8 = 0x4C;
+const KEY_NUM6:   u8 = 0x4D;
+const KEY_NUM1:   u8 = 0x4F;
+const KEY_NUM2:   u8 = 0x50;
+const KEY_NUM3:   u8 = 0x51;
+const KEY_NUM0:   u8 = 0x52;
+const KEY_NUM_DOT: u8 = 0x53;
+const KEY_NUM_PLUS:  u8 = 0x4E;
+const KEY_NUM_MINUS: u8 = 0x4A;
+const KEY_NUM_STAR:  u8 = 0x37;
+const KEY_NUM_ENTER: u8 = 0x1C; // extended 0xE0 0x1C — same base code
+
+// Misc
+const KEY_MINUS:  u8 = 0x0C;
+const KEY_EQUALS: u8 = 0x0D;
+const KEY_LBRACE: u8 = 0x1A;
+const KEY_RBRACE: u8 = 0x1B;
+const KEY_SEMI:   u8 = 0x27;
+const KEY_QUOTE:  u8 = 0x28;
+const KEY_GRAVE:  u8 = 0x29;
+const KEY_BACKSL: u8 = 0x2B;
+const KEY_COMMA:  u8 = 0x33;
+const KEY_DOT:    u8 = 0x34;
+const KEY_SLASH:  u8 = 0x35;
+
+// Break-code sentinel (first break-code value)
+const KEY_RELEASED: u8 = 0x80;

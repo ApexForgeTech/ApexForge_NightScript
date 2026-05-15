@@ -1,46 +1,131 @@
 package alloc.buf;
 
-extern "C" fn malloc(size: usize) -> *u8;
-extern "C" fn realloc(ptr: *u8, size: usize) -> *u8;
-extern "C" fn free(ptr: *u8) -> void;
-extern "C" fn memcpy(dst: *u8, src: *u8, n: usize) -> *u8;
+extern fn malloc(size: usize) -> *u8;
+extern fn realloc(ptr: *u8, size: usize) -> *u8;
+extern fn free(ptr: *u8) -> void;
+extern fn memset(ptr: *u8, val: i32, n: usize) -> *u8;
+extern fn memcmp(a: *u8, b: *u8, n: usize) -> i32;
 
-/* Growable byte buffer. */
+// Growable heap-allocated byte buffer.
+// All operations return false / null on allocation failure.
 struct Buf {
     data: *u8;
-    len: usize;
-    cap: usize;
+    len:  usize;
+    cap:  usize;
 }
 
+// Create an empty buffer (no heap allocation yet).
 pub fn buf_new() -> Buf {
     return Buf { data: null, len: 0, cap: 0 };
 }
 
+// Create a buffer with pre-allocated capacity.
+pub fn buf_with_cap(cap: usize) -> Buf {
+    let b: Buf = Buf { data: null, len: 0, cap: 0 };
+    let p: *u8 = malloc(cap);
+    if p != null {
+        b.data = p;
+        b.cap  = cap;
+    }
+    return b;
+}
+
+// Ensure at least `min_cap` bytes of capacity are available.
+// Returns false on allocation failure.
+pub fn buf_reserve(b: *Buf, min_cap: usize) -> bool {
+    if (*b).cap >= min_cap {
+        return true;
+    }
+    let new_cap: usize = (*b).cap * 2;
+    if new_cap < min_cap {
+        new_cap = min_cap;
+    }
+    if new_cap < 16 {
+        new_cap = 16;
+    }
+    let p: *u8 = realloc((*b).data, new_cap);
+    if p == null {
+        return false;
+    }
+    (*b).data = p;
+    (*b).cap  = new_cap;
+    return true;
+}
+
+// Append a single byte. Returns false on allocation failure.
 pub fn buf_push(b: *Buf, byte: u8) -> bool {
-    if (*b).len == (*b).cap {
-        let new_cap: usize = (*b).cap * 2;
-        if new_cap == 0 {
-            new_cap = 16;
-        }
-        let new_data: *u8 = realloc((*b).data, new_cap);
-        if new_data == null {
-            return false;
-        }
-        (*b).data = new_data;
-        (*b).cap = new_cap;
+    let needed: usize = (*b).len + 1;
+    if !buf_reserve(b, needed) {
+        return false;
     }
     let idx: usize = (*b).len;
+    (*b).data[idx] = byte;
     (*b).len = (*b).len + 1;
     return true;
 }
 
-pub fn buf_len(b: *Buf) -> usize {
-    return (*b).len;
+// Remove and return the last byte. Returns 0 if empty.
+pub fn buf_pop(b: *Buf) -> u8 {
+    if (*b).len == 0 {
+        return 0;
+    }
+    (*b).len = (*b).len - 1;
+    return (*b).data[(*b).len];
 }
 
+// Read byte at index (no bounds checking).
+pub fn buf_get(b: *Buf, idx: usize) -> u8 {
+    return (*b).data[idx];
+}
+
+// Write byte at index (no bounds checking).
+pub fn buf_set(b: *Buf, idx: usize, byte: u8) -> void {
+    (*b).data[idx] = byte;
+}
+
+// Fill entire buffer content with a byte value (does not change length).
+pub fn buf_fill(b: *Buf, byte: u8) -> void {
+    memset((*b).data, byte as i32, (*b).len);
+}
+
+// Reset length to zero (retains allocated capacity).
+pub fn buf_clear(b: *Buf) -> void {
+    (*b).len = 0;
+}
+
+// Compare two buffers byte-for-byte. Returns true if equal.
+pub fn buf_eq(a: *Buf, b: *Buf) -> bool {
+    if (*a).len != (*b).len {
+        return false;
+    }
+    return memcmp((*a).data, (*b).data, (*a).len) == 0;
+}
+
+// Append a null byte and return a raw pointer to the internal data.
+// Pass to extern functions expecting cstr / const char*.
+// The pointer is valid until the next mutation.
+pub fn buf_as_ptr(b: *Buf) -> *u8 {
+    buf_push(b, 0);
+    (*b).len = (*b).len - 1; // keep len as content length, not including null
+    return (*b).data;
+}
+
+// Current number of bytes stored.
+pub fn buf_len(b: *Buf) -> usize { return (*b).len; }
+
+// Current allocated capacity.
+pub fn buf_cap(b: *Buf) -> usize { return (*b).cap; }
+
+// True if no bytes are stored.
+pub fn buf_is_empty(b: *Buf) -> bool { return (*b).len == 0; }
+
+// Raw pointer to the underlying data (may be null before first write).
+pub fn buf_data(b: *Buf) -> *u8 { return (*b).data; }
+
+// Free heap memory and reset to empty state.
 pub fn buf_free(b: *Buf) -> void {
     free((*b).data);
     (*b).data = null;
-    (*b).len = 0;
-    (*b).cap = 0;
+    (*b).len  = 0;
+    (*b).cap  = 0;
 }

@@ -1,0 +1,49 @@
+package kernel.framebuffer;
+
+// Linear framebuffer (VESA / Limine-provided)
+// Codegen emits ns_fb_* in kernel runtime (including 8x8 pixel font)
+
+extern fn ns_fb_init(addr: *u8, width: u32, height: u32, pitch_bytes: u32) -> void;
+extern fn ns_fb_pixel(x: u32, y: u32, color: u32) -> void;
+extern fn ns_fb_fill(x: u32, y: u32, w: u32, h: u32, color: u32) -> void;
+extern fn ns_fb_clear(color: u32) -> void;
+extern fn ns_fb_char(x: u32, y: u32, ch: u8, fg: u32, bg: u32) -> void;
+extern fn ns_fb_str(x: u32, y: u32, s: cstr, fg: u32, bg: u32) -> void;
+
+// Initialize the framebuffer with a Limine/VESA-provided address and dimensions
+pub fn init(addr: *u8, w: u32, h: u32, pitch: u32) -> void {
+    ns_fb_init(addr, w, h, pitch);
+}
+
+// Draw a single pixel at (x, y) with 32-bit ARGB color
+pub fn pixel(x: u32, y: u32, color: u32) -> void { ns_fb_pixel(x, y, color); }
+
+// Fill a rectangle with a solid color
+pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
+    ns_fb_fill(x, y, w, h, color);
+}
+
+// Clear the entire framebuffer to a color
+pub fn clear(color: u32) -> void { ns_fb_clear(color); }
+
+// Draw an 8×8 pixel character at (x, y)
+pub fn draw_char(x: u32, y: u32, ch: u8, fg: u32, bg: u32) -> void {
+    ns_fb_char(x, y, ch, fg, bg);
+}
+
+// Draw a null-terminated string starting at (x, y), 9px wide per char, 10px per line
+pub fn draw_str(x: u32, y: u32, s: cstr, fg: u32, bg: u32) -> void {
+    ns_fb_str(x, y, s, fg, bg);
+}
+
+// Common 32-bit ARGB colors
+const BLACK:   u32 = 0x00000000;
+const WHITE:   u32 = 0x00FFFFFF;
+const RED:     u32 = 0x00FF0000;
+const GREEN:   u32 = 0x0000FF00;
+const BLUE:    u32 = 0x000000FF;
+const YELLOW:  u32 = 0x00FFFF00;
+const CYAN:    u32 = 0x0000FFFF;
+const MAGENTA: u32 = 0x00FF00FF;
+const GRAY:    u32 = 0x00808080;
+const DARKBLUE: u32 = 0x00101040;

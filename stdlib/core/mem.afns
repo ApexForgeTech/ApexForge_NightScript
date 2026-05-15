@@ -1,29 +1,80 @@
 package core.mem;
 
-extern "C" fn memcpy(dst: *u8, src: *u8, n: usize) -> *u8;
-extern "C" fn memmove(dst: *u8, src: *u8, n: usize) -> *u8;
-extern "C" fn memset(ptr: *u8, val: i32, n: usize) -> *u8;
-extern "C" fn memcmp(a: *u8, b: *u8, n: usize) -> i32;
-extern "C" fn malloc(size: usize) -> *u8;
-extern "C" fn realloc(ptr: *u8, size: usize) -> *u8;
-extern "C" fn free(ptr: *u8) -> void;
+extern fn memcpy(dst: *u8, src: *u8, n: usize) -> *u8;
+extern fn memmove(dst: *u8, src: *u8, n: usize) -> *u8;
+extern fn memset(ptr: *u8, val: i32, n: usize) -> *u8;
+extern fn memcmp(a: *u8, b: *u8, n: usize) -> i32;
+extern fn malloc(size: usize) -> *u8;
+extern fn realloc(ptr: *u8, size: usize) -> *u8;
+extern fn free(ptr: *u8) -> void;
 
-pub fn copy(dst: *u8, src: *u8, n: usize) -> void {
-    memcpy(dst, src, n);
+// ── Copy / move ───────────────────────────────────────────────────────────────
+
+// Copy n bytes from src to dst (regions must not overlap).
+pub fn copy(dst: *u8, src: *u8, n: usize) -> void { memcpy(dst, src, n); }
+
+// Copy n bytes, safe even when regions overlap.
+pub fn copy_overlap(dst: *u8, src: *u8, n: usize) -> void { memmove(dst, src, n); }
+
+// ── Fill / zero ───────────────────────────────────────────────────────────────
+
+// Fill n bytes starting at ptr with the value byte.
+pub fn fill(ptr: *u8, byte: u8, n: usize) -> void { memset(ptr, byte as i32, n); }
+
+// Zero n bytes starting at ptr.
+pub fn zero(ptr: *u8, n: usize) -> void { memset(ptr, 0, n); }
+
+// ── Compare ───────────────────────────────────────────────────────────────────
+
+// Compare n bytes. Returns 0 if equal, <0 if a < b, >0 if a > b.
+pub fn compare(a: *u8, b: *u8, n: usize) -> i32 { return memcmp(a, b, n); }
+
+// True if n bytes at a and b are identical.
+pub fn eq(a: *u8, b: *u8, n: usize) -> bool { return memcmp(a, b, n) == 0; }
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+// ── Allocation ────────────────────────────────────────────────────────────────
+
+// Allocate size bytes (uninitialized). Returns null on failure.
+pub fn alloc(size: usize) -> *u8 { return malloc(size); }
+
+// Allocate size bytes, zeroed. Returns null on failure.
+pub fn alloc_zeroed(size: usize) -> *u8 {
+    let p: *u8 = malloc(size);
+    if p != null { memset(p, 0, size); }
+    return p;
 }
 
-pub fn zero(ptr: *u8, n: usize) -> void {
-    memset(ptr, 0, n);
+// Resize a previously allocated block. Returns null on failure (original ptr is unchanged).
+pub fn resize(ptr: *u8, new_size: usize) -> *u8 { return realloc(ptr, new_size); }
+
+// Duplicate n bytes from src into a newly allocated buffer. Returns null on failure.
+pub fn dup(src: *u8, n: usize) -> *u8 {
+    let p: *u8 = malloc(n);
+    if p != null { memcpy(p, src, n); }
+    return p;
 }
 
-pub fn alloc(size: usize) -> *u8 {
-    return malloc(size);
+// Free a previously allocated block. Safe to call with null.
+pub fn dealloc(ptr: *u8) -> void { if ptr != null { free(ptr); } }
+
+// True if ptr is null.
+pub fn is_null(ptr: *u8) -> bool { return ptr == null; }
+
+// ── Alignment ─────────────────────────────────────────────────────────────────
+
+// Round addr up to the nearest multiple of align (align must be a power of two).
+pub fn align_up(addr: usize, align: usize) -> usize {
+    return (addr + align - 1) & ~(align - 1);
 }
 
-pub fn dealloc(ptr: *u8) -> void {
-    free(ptr);
+// Round addr down to the nearest multiple of align.
+pub fn align_down(addr: usize, align: usize) -> usize {
+    return addr & ~(align - 1);
 }
 
-pub fn resize(ptr: *u8, new_size: usize) -> *u8 {
-    return realloc(ptr, new_size);
+// True if addr is aligned to align bytes.
+pub fn is_aligned(addr: usize, align: usize) -> bool {
+    return (addr & (align - 1)) == 0;
 }

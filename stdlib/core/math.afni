@@ -1,0 +1,68 @@
+// core.math — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package core.math;
+
+const PI:      f64;
+const TAU:     f64;
+const E:       f64;
+const SQRT2:   f64;
+const LN2:     f64;
+const LN10:    f64;
+
+pub fn abs_i32(x: i32) -> i32;
+pub fn abs_i64(x: i64) -> i64;
+pub fn abs_f64(x: f64) -> f64;
+pub fn min_i32(a: i32, b: i32) -> i32;
+pub fn max_i32(a: i32, b: i32) -> i32;
+pub fn min_i64(a: i64, b: i64) -> i64;
+pub fn max_i64(a: i64, b: i64) -> i64;
+pub fn min_u32(a: u32, b: u32) -> u32;
+pub fn max_u32(a: u32, b: u32) -> u32;
+pub fn min_f64(a: f64, b: f64) -> f64;
+pub fn max_f64(a: f64, b: f64) -> f64;
+pub fn clamp_i32(x: i32, lo: i32, hi: i32) -> i32;
+pub fn clamp_i64(x: i64, lo: i64, hi: i64) -> i64;
+pub fn clamp_u32(x: u32, lo: u32, hi: u32) -> u32;
+pub fn clamp_f64(x: f64, lo: f64, hi: f64) -> f64;
+pub fn floor_f64(x: f64) -> f64;
+pub fn ceil_f64(x: f64) -> f64;
+pub fn round_f64(x: f64) -> f64;
+pub fn trunc_f64(x: f64) -> i64;
+pub fn sqrt_f64(x: f64) -> f64;
+pub fn pow_f64(base: f64, e: f64) -> f64;
+pub fn pow_i32(base: i32, exp: i32) -> i32;
+pub fn pow_u64(base: u64, exp: u32) -> u64;
+pub fn ln_f64(x: f64) -> f64;
+pub fn log2_f64(x: f64) -> f64;
+pub fn log10_f64(x: f64) -> f64;
+pub fn log2_u32(n: u32) -> i32;
+pub fn log2_u64(n: u64) -> i32;
+pub fn sin_f64(x: f64) -> f64;
+pub fn cos_f64(x: f64) -> f64;
+pub fn tan_f64(x: f64) -> f64;
+pub fn asin_f64(x: f64) -> f64;
+pub fn acos_f64(x: f64) -> f64;
+pub fn atan_f64(x: f64) -> f64;
+pub fn atan2_f64(y: f64, x: f64) -> f64;
+pub fn deg_to_rad(deg: f64) -> f64;
+pub fn rad_to_deg(rad: f64) -> f64;
+pub fn fmod_f64(x: f64, y: f64) -> f64;
+pub fn mod_i32(a: i32, b: i32) -> i32;
+pub fn gcd_u32(a: u32, b: u32) -> u32;
+pub fn lcm_u32(a: u32, b: u32) -> u32;
+pub fn gcd_u64(a: u64, b: u64) -> u64;
+pub fn is_pow2_u32(n: u32) -> bool;
+pub fn is_pow2_u64(n: u64) -> bool;
+pub fn next_pow2_u32(n: u32) -> u32;
+pub fn trailing_zeros_u32(n: u32) -> u32;
+pub fn popcount_u32(n: u32) -> u32;
+pub fn rotl32(n: u32, shift: u32) -> u32;
+pub fn rotr32(n: u32, shift: u32) -> u32;
+pub fn div_ceil_u32(a: u32, b: u32) -> u32;
+pub fn div_ceil_u64(a: u64, b: u64) -> u64;
+pub fn align_up_u32(addr: u32, align: u32) -> u32;
+pub fn align_down_u32(addr: u32, align: u32) -> u32;
+pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool;
+pub fn lerp(a: f64, b: f64, t: f64) -> f64;
+pub fn map_range(v: f64, in_lo: f64, in_hi: f64, out_lo: f64, out_hi: f64) -> f64;

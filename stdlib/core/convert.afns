@@ -1,53 +1,127 @@
 package core.convert;
 
-extern "C" fn atoi(s: str) -> i32;
-extern "C" fn atol(s: str) -> i64;
-extern "C" fn atof(s: str) -> f64;
-extern "C" fn snprintf(buf: *u8, n: usize, fmt: str) -> i32;
+// C stdlib conversion functions
+extern fn atoi(s: cstr) -> i32;
+extern fn atol(s: cstr) -> i64;
+extern fn atof(s: cstr) -> f64;
+extern fn strtoul(s: cstr, end: *u8, base: i32) -> u64;
+extern fn strtoll(s: cstr, end: *u8, base: i32) -> i64;
 
-pub fn str_to_i32(s: str) -> i32 {
-    return atoi(s);
+// NightScript codegen runtime helpers (emitted in emit_stdlib_runtime)
+extern fn ns_conv_i32_to_str(n: i32) -> cstr;
+extern fn ns_conv_i64_to_str(n: i64) -> cstr;
+extern fn ns_conv_u32_to_str(n: u32) -> cstr;
+extern fn ns_conv_u64_to_str(n: u64) -> cstr;
+extern fn ns_conv_f64_to_str(n: f64) -> cstr;
+extern fn ns_conv_i32_to_hex(n: i32) -> cstr;
+extern fn ns_conv_u32_to_hex(n: u32) -> cstr;
+extern fn ns_conv_bool_to_str(b: bool) -> cstr;
+
+// ── String → number ───────────────────────────────────────────────────────────
+
+pub fn str_to_i32(s: cstr) -> i32  { return atoi(s); }
+pub fn str_to_i64(s: cstr) -> i64  { return atol(s); }
+pub fn str_to_f64(s: cstr) -> f64  { return atof(s); }
+
+pub fn str_to_u32(s: cstr) -> u32 {
+    return strtoul(s, null, 10) as u32;
+}
+pub fn str_to_u64(s: cstr) -> u64 {
+    return strtoul(s, null, 10);
 }
 
-pub fn str_to_i64(s: str) -> i64 {
-    return atol(s);
+// Parse a hex string like "0x1F" or "1F"
+pub fn hex_to_u32(s: cstr) -> u32 {
+    return strtoul(s, null, 16) as u32;
+}
+pub fn hex_to_u64(s: cstr) -> u64 {
+    return strtoul(s, null, 16);
 }
 
-pub fn str_to_f64(s: str) -> f64 {
-    return atof(s);
+// Parse a string as boolean: non-zero integer → true; "0" / empty → false.
+pub fn str_to_bool(s: cstr) -> bool {
+    return atoi(s) != 0;
 }
 
-pub fn i32_to_bool(x: i32) -> bool {
-    return x != 0;
+// ── Number → string (uses internal rotating 8-slot buffer, 64 bytes each) ─────
+
+pub fn i32_to_str(n: i32) -> cstr  { return ns_conv_i32_to_str(n); }
+pub fn i64_to_str(n: i64) -> cstr  { return ns_conv_i64_to_str(n); }
+pub fn u32_to_str(n: u32) -> cstr  { return ns_conv_u32_to_str(n); }
+pub fn u64_to_str(n: u64) -> cstr  { return ns_conv_u64_to_str(n); }
+pub fn f64_to_str(n: f64) -> cstr  { return ns_conv_f64_to_str(n); }
+pub fn i32_to_hex(n: i32) -> cstr  { return ns_conv_i32_to_hex(n); }
+pub fn u32_to_hex(n: u32) -> cstr  { return ns_conv_u32_to_hex(n); }
+pub fn bool_to_str(b: bool) -> cstr { return ns_conv_bool_to_str(b); }
+
+// ── Numeric cross-type casts ──────────────────────────────────────────────────
+
+pub fn i32_to_bool(x: i32) -> bool  { return x != 0; }
+pub fn bool_to_i32(b: bool) -> i32  { if b { return 1; } return 0; }
+pub fn i32_to_i64(x: i32) -> i64    { return x as i64; }
+pub fn i64_to_i32(x: i64) -> i32    { return x as i32; }
+pub fn i32_to_u32(x: i32) -> u32    { return x as u32; }
+pub fn u32_to_i32(x: u32) -> i32    { return x as i32; }
+pub fn i32_to_u64(x: i32) -> u64    { return x as u64; }
+pub fn u64_to_i32(x: u64) -> i32    { return x as i32; }
+pub fn i64_to_u64(x: i64) -> u64    { return x as u64; }
+pub fn u64_to_i64(x: u64) -> i64    { return x as i64; }
+pub fn u32_to_u64(x: u32) -> u64    { return x as u64; }
+pub fn u64_to_u32(x: u64) -> u32    { return x as u32; }
+pub fn i32_to_f64(x: i32) -> f64    { return x as f64; }
+pub fn f64_to_i32(x: f64) -> i32    { return x as i32; }
+pub fn i64_to_f64(x: i64) -> f64    { return x as f64; }
+pub fn f64_to_i64(x: f64) -> i64    { return x as i64; }
+pub fn u32_to_f64(x: u32) -> f64    { return x as f64; }
+pub fn f64_to_u32(x: f64) -> u32    { return x as u32; }
+pub fn f32_to_f64(x: f32) -> f64    { return x as f64; }
+pub fn f64_to_f32(x: f64) -> f32    { return x as f32; }
+
+// ── Byte / char conversions ───────────────────────────────────────────────────
+
+pub fn u8_to_i32(x: u8) -> i32   { return x as i32; }
+pub fn i32_to_u8(x: i32) -> u8   { return x as u8; }
+pub fn u8_to_char(x: u8) -> u8   { return x; }        // char is u8 in NightScript
+pub fn char_to_u8(c: u8) -> u8   { return c; }
+pub fn u8_to_bool(x: u8) -> bool { return x != 0; }
+pub fn bool_to_u8(b: bool) -> u8 { if b { return 1; } return 0; }
+
+// Is ASCII digit?
+pub fn is_digit(c: u8) -> bool { return c >= 48 && c <= 57; }
+
+// Is ASCII letter?
+pub fn is_alpha(c: u8) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
 
-pub fn bool_to_i32(b: bool) -> i32 {
-    if b {
-        return 1;
-    }
-    return 0;
+// Is ASCII alphanumeric?
+pub fn is_alnum(c: u8) -> bool { return is_digit(c) || is_alpha(c); }
+
+// Is ASCII whitespace?
+pub fn is_space(c: u8) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
 }
 
-pub fn i32_to_i64(x: i32) -> i64 {
-    return x as i64;
+// Convert ASCII letter to lowercase (returns unchanged if not a letter)
+pub fn to_lower(c: u8) -> u8 {
+    if c >= 65 && c <= 90 { return c + 32; }
+    return c;
 }
 
-pub fn i64_to_i32(x: i64) -> i32 {
-    return x as i32;
+// Convert ASCII letter to uppercase
+pub fn to_upper(c: u8) -> u8 {
+    if c >= 97 && c <= 122 { return c - 32; }
+    return c;
 }
 
-pub fn i32_to_f64(x: i32) -> f64 {
-    return x as f64;
+// ASCII digit character to numeric value (e.g. '7' → 7); returns 255 if not a digit
+pub fn digit_val(c: u8) -> u8 {
+    if c >= 48 && c <= 57 { return c - 48; }
+    return 255;
 }
 
-pub fn f64_to_i32(x: f64) -> i32 {
-    return x as i32;
-}
-
-pub fn u8_to_i32(x: u8) -> i32 {
-    return x as i32;
-}
-
-pub fn i32_to_u8(x: i32) -> u8 {
-    return x as u8;
+// Numeric value to ASCII digit character (0..9 → '0'..'9'); others → '?'
+pub fn digit_char(v: u8) -> u8 {
+    if v <= 9 { return v + 48; }
+    return 63;
 }

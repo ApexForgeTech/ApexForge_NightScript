@@ -1,0 +1,71 @@
+package kernel.wm;
+
+// NightOS Window Manager — kernel framebuffer-based, v0.6.
+// The codegen runtime (emit_kernel_app) emits the NS_Win struct, WM state,
+// and all ns_wm_* / ns_win_* functions.
+
+extern fn ns_wm_init() -> void;
+extern fn ns_wm_create(title: cstr, x: i32, y: i32, w: i32, h: i32) -> i32;
+extern fn ns_wm_render() -> void;
+extern fn ns_wm_handle_mouse(mx: i32, my: i32, btn: u8) -> void;
+extern fn ns_win_visible(idx: i32) -> u8;
+extern fn ns_win_closing(idx: i32) -> u8;
+extern fn ns_win_x(idx: i32) -> i32;
+extern fn ns_win_y(idx: i32) -> i32;
+extern fn ns_win_w(idx: i32) -> i32;
+extern fn ns_win_h(idx: i32) -> i32;
+
+// ── Window Manager lifecycle ──────────────────────────────────────────────────
+
+// Initialize the window manager (clear window list, reset focus/drag state).
+// Must be called before any ns_wm_create().
+pub fn init() -> void { ns_wm_init(); }
+
+// Create a new window. Returns its window index (0-based), or -1 if the
+// maximum number of windows (8) has been reached.
+//   title — null-terminated title bar text
+//   x, y  — top-left corner of the window body (excluding title bar)
+//   w, h  — width and height of the window body
+pub fn create(title: cstr, x: i32, y: i32, w: i32, h: i32) -> i32 {
+    return ns_wm_create(title, x, y, w, h);
+}
+
+// Redraw the desktop background, taskbar, and all windows (unfocused first,
+// then the focused window on top). Does not draw the mouse cursor.
+pub fn render() -> void { ns_wm_render(); }
+
+// Process a mouse event: update focus, handle dragging, detect close clicks.
+//   mx, my — current mouse coordinates (from mouse.x() and mouse.y())
+//   btn    — current button state (from mouse.buttons())
+pub fn on_mouse(mx: i32, my: i32, btn: u8) -> void {
+    ns_wm_handle_mouse(mx, my, btn);
+}
+
+// ── Window property queries ───────────────────────────────────────────────────
+
+pub fn is_visible(idx: i32) -> bool  { return ns_win_visible(idx) != 0; }
+pub fn is_closing(idx: i32) -> bool  { return ns_win_closing(idx) != 0; }
+pub fn win_x(idx: i32) -> i32        { return ns_win_x(idx); }
+pub fn win_y(idx: i32) -> i32        { return ns_win_y(idx); }
+pub fn win_w(idx: i32) -> i32        { return ns_win_w(idx); }
+pub fn win_h(idx: i32) -> i32        { return ns_win_h(idx); }
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const TITLEBAR_HEIGHT: i32 = 20;    // height of the window title bar (pixels)
+const BORDER_WIDTH:    i32 = 2;     // border thickness around the window
+const CLOSE_BTN_W:     i32 = 16;    // width of the close button
+const TASKBAR_HEIGHT:  i32 = 24;    // taskbar at the bottom of the screen
+const MAX_WINDOWS:     i32 = 8;     // maximum number of simultaneous windows
+
+// ── Desktop color palette ─────────────────────────────────────────────────────
+
+const COLOR_DESKTOP:      u32 = 0x00203050;
+const COLOR_TASKBAR:      u32 = 0x00102040;
+const COLOR_TITLEBAR_FOC: u32 = 0x001060C0;  // focused window title bar
+const COLOR_TITLEBAR_UNF: u32 = 0x00405060;  // unfocused window title bar
+const COLOR_BORDER:       u32 = 0x004090D0;
+const COLOR_BODY:         u32 = 0x00181820;
+const COLOR_CLOSE_BTN:    u32 = 0x00CC2222;
+const COLOR_TXT_WHITE:    u32 = 0x00FFFFFF;
+const COLOR_TXT_ACCENT:   u32 = 0x0080C0FF;

@@ -1,0 +1,28 @@
+// std.process — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package std.process;
+
+const SIGABRT: i32;
+const SIGFPE:  i32;
+const SIGILL:  i32;
+const SIGINT:  i32;
+const SIGSEGV: i32;
+const SIGTERM: i32;
+const SIGHUP:  i32;
+const SIGKILL: i32;
+const SIGPIPE: i32;
+const SIGUSR1: i32;
+const SIGUSR2: i32;
+const SIGCHLD: i32;
+const SIGALRM: i32;
+
+pub fn quit(code: i32) -> void;
+pub fn quit_ok() -> void;
+pub fn quit_fail() -> void;
+pub fn crash() -> void;
+pub fn getpid() -> i32;
+pub fn getppid() -> i32;
+pub fn send_signal(sig: i32) -> i32;
+pub fn env_get(name: cstr) -> cstr;
+pub fn shell(cmd: cstr) -> i32;

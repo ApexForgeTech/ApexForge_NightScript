@@ -1,36 +1,108 @@
 package kernel.vga;
 
-const VGA_COLS: i32 = 80;
-const VGA_ROWS: i32 = 25;
+// VGA text-mode driver (80×25, 16 colors).
+// The kernel runtime (emitted by codegen) maps the VGA buffer at 0xB8000 and
+// provides the ns_vga_* helpers.
 
-const COLOR_BLACK:  u8 = 0;
-const COLOR_WHITE:  u8 = 15;
-const COLOR_GREEN:  u8 = 2;
-const COLOR_RED:    u8 = 4;
-const COLOR_BLUE:   u8 = 9;
-const COLOR_YELLOW: u8 = 14;
+extern fn ns_vga_clear() -> void;
+extern fn ns_vga_print(s: cstr) -> void;
+extern fn ns_vga_println(s: cstr) -> void;
+extern fn ns_vga_print_u32(n: u32) -> void;
+extern fn ns_vga_print_hex(n: u32) -> void;
+extern fn ns_vga_set_color(attr: u8) -> void;
 
-fn make_color_byte(fg: u8, bg: u8) -> u8 {
-    return (bg << 4) | fg;
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Clear the screen with the current color attribute.
+pub fn clear() -> void                 { ns_vga_clear(); }
+
+// Print a null-terminated string at the current cursor position.
+pub fn print(s: cstr) -> void          { ns_vga_print(s); }
+
+// Print a null-terminated string followed by a newline.
+pub fn println(s: cstr) -> void        { ns_vga_println(s); }
+
+// Print a u32 in decimal.
+pub fn print_u32(n: u32) -> void       { ns_vga_print_u32(n); }
+
+// Print a u32 in hexadecimal (no "0x" prefix).
+pub fn print_hex(n: u32) -> void       { ns_vga_print_hex(n); }
+
+// Set the current color attribute byte (foreground | background<<4).
+pub fn set_color(attr: u8) -> void     { ns_vga_set_color(attr); }
+
+// ── Color attribute helpers ───────────────────────────────────────────────────
+
+// Build a VGA attribute byte from foreground and background color indices.
+pub fn color_attr(fg: u8, bg: u8) -> u8 { return (bg << 4) | (fg & 0x0F); }
+
+// Set foreground and background colors independently.
+pub fn set_fg_bg(fg: u8, bg: u8) -> void { set_color(color_attr(fg, bg)); }
+
+// ── VGA text-mode color indices ───────────────────────────────────────────────
+
+const BLACK:         u8 = 0;
+const BLUE:          u8 = 1;
+const GREEN:         u8 = 2;
+const CYAN:          u8 = 3;
+const RED:           u8 = 4;
+const MAGENTA:       u8 = 5;
+const BROWN:         u8 = 6;
+const LIGHT_GREY:    u8 = 7;
+const DARK_GREY:     u8 = 8;
+const LIGHT_BLUE:    u8 = 9;
+const LIGHT_GREEN:   u8 = 10;
+const LIGHT_CYAN:    u8 = 11;
+const LIGHT_RED:     u8 = 12;
+const LIGHT_MAGENTA: u8 = 13;
+const YELLOW:        u8 = 14;
+const WHITE:         u8 = 15;
+
+// ── Pre-built common attribute bytes ─────────────────────────────────────────
+
+const ATTR_WHITE_ON_BLACK:  u8 = 0x0F;  // default terminal look
+const ATTR_GREEN_ON_BLACK:  u8 = 0x0A;  // classic green terminal
+const ATTR_CYAN_ON_BLACK:   u8 = 0x0B;  // header / highlight
+const ATTR_YELLOW_ON_BLACK: u8 = 0x0E;  // warning
+const ATTR_RED_ON_BLACK:    u8 = 0x04;  // error
+const ATTR_WHITE_ON_BLUE:   u8 = 0x1F;  // selection / status bar
+const ATTR_BLACK_ON_WHITE:  u8 = 0x70;  // reverse video
+
+// ── VGA screen dimensions ─────────────────────────────────────────────────────
+
+const VGA_COLS: u32 = 80;
+const VGA_ROWS: u32 = 25;
+
+// ── VGA buffer address ────────────────────────────────────────────────────────
+
+const VGA_BUFFER: u32 = 0xB8000;
+
+// ── VGA CRTC cursor control ───────────────────────────────────────────────────
+
+const VGA_CRTC_ADDR: u16 = 0x3D4;
+const VGA_CRTC_DATA: u16 = 0x3D5;
+const VGA_CURSOR_HI: u8  = 0x0E;
+const VGA_CURSOR_LO: u8  = 0x0F;
+
+// Move the hardware cursor to the given column and row (0-based).
+pub fn move_cursor(col: u32, row: u32) -> void {
+    let pos: u32 = row * VGA_COLS + col;
+    outb(VGA_CRTC_ADDR, VGA_CURSOR_HI);
+    outb(VGA_CRTC_DATA, (pos >> 8) as u8);
+    outb(VGA_CRTC_ADDR, VGA_CURSOR_LO);
+    outb(VGA_CRTC_DATA, pos as u8);
 }
 
-fn make_entry(c: u8, fg: u8, bg: u8) -> u16 {
-    let color: u8 = make_color_byte(fg, bg);
-    return (color as u16 << 8) | c as u16;
+// Hide the hardware cursor (set start > end scanline).
+pub fn cursor_hide() -> void {
+    outb(VGA_CRTC_ADDR, 0x0A);
+    outb(VGA_CRTC_DATA, 0x20);
 }
 
-fn vga_index(row: i32, col: i32) -> i32 {
-    return row * VGA_COLS + col;
-}
-
-pub fn entry_for(c: u8, fg: u8, bg: u8) -> u16 {
-    return make_entry(c, fg, bg);
-}
-
-pub fn index_of(row: i32, col: i32) -> i32 {
-    return vga_index(row, col);
-}
-
-pub fn color_white_on_black() -> u8 {
-    return make_color_byte(COLOR_WHITE, COLOR_BLACK);
+// Show the hardware cursor with the default underscore shape (scanlines 14–15).
+pub fn cursor_show() -> void {
+    outb(VGA_CRTC_ADDR, 0x0A);
+    outb(VGA_CRTC_DATA, 0x0E);
+    outb(VGA_CRTC_ADDR, 0x0B);
+    outb(VGA_CRTC_DATA, 0x0F);
 }

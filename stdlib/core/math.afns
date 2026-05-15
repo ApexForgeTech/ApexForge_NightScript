@@ -1,77 +1,273 @@
 package core.math;
 
+// ── Float math (backed by libm via codegen runtime) ──────────────────────────
+
+extern fn ns_math_sqrt(x: f64) -> f64;
+extern fn ns_math_fabs(x: f64) -> f64;
+extern fn ns_math_floor(x: f64) -> f64;
+extern fn ns_math_ceil(x: f64) -> f64;
+extern fn ns_math_round(x: f64) -> f64;
+extern fn ns_math_fmod(x: f64, y: f64) -> f64;
+extern fn ns_math_sin(x: f64) -> f64;
+extern fn ns_math_cos(x: f64) -> f64;
+extern fn ns_math_tan(x: f64) -> f64;
+extern fn ns_math_asin(x: f64) -> f64;
+extern fn ns_math_acos(x: f64) -> f64;
+extern fn ns_math_atan(x: f64) -> f64;
+extern fn ns_math_atan2(y: f64, x: f64) -> f64;
+extern fn ns_math_log(x: f64) -> f64;
+extern fn ns_math_log2(x: f64) -> f64;
+extern fn ns_math_log10(x: f64) -> f64;
+extern fn ns_math_exp(x: f64) -> f64;
+extern fn ns_math_pow(base: f64, exp: f64) -> f64;
+
+// Mathematical constants
+const PI:      f64 = 3.14159265358979323846;
+const TAU:     f64 = 6.28318530717958647692;
+const E:       f64 = 2.71828182845904523536;
+const SQRT2:   f64 = 1.41421356237309504880;
+const LN2:     f64 = 0.69314718055994530942;
+const LN10:    f64 = 2.30258509299404568402;
+const INF:     f64 = 1.0 / 0.0;   // positive infinity
+const NEG_INF: f64 = -1.0 / 0.0;  // negative infinity
+
+// ── Integer absolute value ────────────────────────────────────────────────────
+
 pub fn abs_i32(x: i32) -> i32 {
-    if x < 0 {
-        return -x;
-    }
+    if x < 0 { return -x; }
     return x;
 }
 
 pub fn abs_i64(x: i64) -> i64 {
-    if x < 0 {
-        return -x;
-    }
+    if x < 0 { return -x; }
     return x;
 }
 
-pub fn min_i32(a: i32, b: i32) -> i32 {
-    if a < b {
-        return a;
-    }
-    return b;
-}
+pub fn abs_f64(x: f64) -> f64 { return ns_math_fabs(x); }
 
-pub fn max_i32(a: i32, b: i32) -> i32 {
-    if a > b {
-        return a;
-    }
-    return b;
-}
+// ── Integer min / max / clamp ─────────────────────────────────────────────────
 
-pub fn min_i64(a: i64, b: i64) -> i64 {
-    if a < b {
-        return a;
-    }
-    return b;
-}
-
-pub fn max_i64(a: i64, b: i64) -> i64 {
-    if a > b {
-        return a;
-    }
-    return b;
-}
+pub fn min_i32(a: i32, b: i32) -> i32 { if a < b { return a; } return b; }
+pub fn max_i32(a: i32, b: i32) -> i32 { if a > b { return a; } return b; }
+pub fn min_i64(a: i64, b: i64) -> i64 { if a < b { return a; } return b; }
+pub fn max_i64(a: i64, b: i64) -> i64 { if a > b { return a; } return b; }
+pub fn min_u32(a: u32, b: u32) -> u32 { if a < b { return a; } return b; }
+pub fn max_u32(a: u32, b: u32) -> u32 { if a > b { return a; } return b; }
+pub fn min_u64(a: u64, b: u64) -> u64 { if a < b { return a; } return b; }
+pub fn max_u64(a: u64, b: u64) -> u64 { if a > b { return a; } return b; }
 
 pub fn clamp_i32(x: i32, lo: i32, hi: i32) -> i32 {
-    if x < lo {
-        return lo;
-    }
-    if x > hi {
-        return hi;
-    }
+    if x < lo { return lo; }
+    if x > hi { return hi; }
     return x;
 }
-
 pub fn clamp_i64(x: i64, lo: i64, hi: i64) -> i64 {
-    if x < lo {
-        return lo;
-    }
-    if x > hi {
-        return hi;
-    }
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+pub fn clamp_u32(x: u32, lo: u32, hi: u32) -> u32 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
     return x;
 }
 
+// ── Float min / max / clamp ───────────────────────────────────────────────────
+
+pub fn min_f64(a: f64, b: f64) -> f64 { if a < b { return a; } return b; }
+pub fn max_f64(a: f64, b: f64) -> f64 { if a > b { return a; } return b; }
+pub fn clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+// ── Rounding helpers ──────────────────────────────────────────────────────────
+
+pub fn floor_f64(x: f64) -> f64  { return ns_math_floor(x); }
+pub fn ceil_f64(x: f64) -> f64   { return ns_math_ceil(x); }
+pub fn round_f64(x: f64) -> f64  { return ns_math_round(x); }
+pub fn trunc_f64(x: f64) -> i64  { return x as i64; }
+
+// ── Power / root ──────────────────────────────────────────────────────────────
+
+pub fn sqrt_f64(x: f64) -> f64         { return ns_math_sqrt(x); }
+pub fn pow_f64(base: f64, e: f64) -> f64 { return ns_math_pow(base, e); }
+pub fn exp_f64(x: f64) -> f64          { return ns_math_exp(x); }
+
+// Integer power (fast exponentiation by squaring)
 pub fn pow_i32(base: i32, exp: i32) -> i32 {
     let result: i32 = 1;
-    let e: i32 = exp;
     let b: i32 = base;
+    let e: i32 = exp;
     while e > 0 {
-        if (e & 1) != 0 {
-            result = result * b;
-        }
+        if (e & 1) != 0 { result = result * b; }
         b = b * b;
         e = e >> 1;
     }
     return result;
+}
+pub fn pow_u64(base: u64, exp: u32) -> u64 {
+    let result: u64 = 1;
+    let b: u64 = base;
+    let e: u32 = exp;
+    while e > 0 {
+        if (e & 1) != 0 { result = result * b; }
+        b = b * b;
+        e = e >> 1;
+    }
+    return result;
+}
+
+// ── Logarithms ────────────────────────────────────────────────────────────────
+
+pub fn ln_f64(x: f64) -> f64     { return ns_math_log(x); }
+pub fn log2_f64(x: f64) -> f64   { return ns_math_log2(x); }
+pub fn log10_f64(x: f64) -> f64  { return ns_math_log10(x); }
+
+// Integer log2 (floor) — returns -1 for n == 0
+pub fn log2_u32(n: u32) -> i32 {
+    if n == 0 { return -1; }
+    let r: i32 = 0;
+    let v: u32 = n;
+    if v >= 65536 { v = v >> 16; r = r + 16; }
+    if v >= 256   { v = v >> 8;  r = r + 8; }
+    if v >= 16    { v = v >> 4;  r = r + 4; }
+    if v >= 4     { v = v >> 2;  r = r + 2; }
+    if v >= 2     { r = r + 1; }
+    return r;
+}
+pub fn log2_u64(n: u64) -> i32 {
+    if n == 0 { return -1; }
+    let r: i32 = 0;
+    let v: u64 = n;
+    if v >= 4294967296 { v = v >> 32; r = r + 32; }
+    if v >= 65536      { v = v >> 16; r = r + 16; }
+    if v >= 256        { v = v >> 8;  r = r + 8; }
+    if v >= 16         { v = v >> 4;  r = r + 4; }
+    if v >= 4          { v = v >> 2;  r = r + 2; }
+    if v >= 2          { r = r + 1; }
+    return r;
+}
+
+// ── Trigonometry ──────────────────────────────────────────────────────────────
+
+pub fn sin_f64(x: f64) -> f64           { return ns_math_sin(x); }
+pub fn cos_f64(x: f64) -> f64           { return ns_math_cos(x); }
+pub fn tan_f64(x: f64) -> f64           { return ns_math_tan(x); }
+pub fn asin_f64(x: f64) -> f64          { return ns_math_asin(x); }
+pub fn acos_f64(x: f64) -> f64          { return ns_math_acos(x); }
+pub fn atan_f64(x: f64) -> f64          { return ns_math_atan(x); }
+pub fn atan2_f64(y: f64, x: f64) -> f64 { return ns_math_atan2(y, x); }
+
+pub fn deg_to_rad(deg: f64) -> f64 { return deg * PI / 180.0; }
+pub fn rad_to_deg(rad: f64) -> f64 { return rad * 180.0 / PI; }
+
+// ── Modulo / remainder ────────────────────────────────────────────────────────
+
+pub fn fmod_f64(x: f64, y: f64) -> f64 { return ns_math_fmod(x, y); }
+
+// True modulo (always non-negative, unlike %)
+pub fn mod_i32(a: i32, b: i32) -> i32 {
+    let r: i32 = a % b;
+    if r < 0 { r = r + abs_i32(b); }
+    return r;
+}
+
+// ── GCD / LCM ─────────────────────────────────────────────────────────────────
+
+pub fn gcd_u32(a: u32, b: u32) -> u32 {
+    let x: u32 = a;
+    let y: u32 = b;
+    while y != 0 {
+        let t: u32 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+pub fn lcm_u32(a: u32, b: u32) -> u32 {
+    let g: u32 = gcd_u32(a, b);
+    if g == 0 { return 0; }
+    return (a / g) * b;
+}
+pub fn gcd_u64(a: u64, b: u64) -> u64 {
+    let x: u64 = a;
+    let y: u64 = b;
+    while y != 0 {
+        let t: u64 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+// ── Bit operations ────────────────────────────────────────────────────────────
+
+// True if n is a power of two (n > 0)
+pub fn is_pow2_u32(n: u32) -> bool { return n > 0 && (n & (n - 1)) == 0; }
+pub fn is_pow2_u64(n: u64) -> bool { return n > 0 && (n & (n - 1)) == 0; }
+
+// Round up to next power of two
+pub fn next_pow2_u32(n: u32) -> u32 {
+    if n == 0 { return 1; }
+    let v: u32 = n - 1;
+    v = v | (v >> 1);
+    v = v | (v >> 2);
+    v = v | (v >> 4);
+    v = v | (v >> 8);
+    v = v | (v >> 16);
+    return v + 1;
+}
+
+// Count trailing zero bits (result is 32 for input 0)
+pub fn trailing_zeros_u32(n: u32) -> u32 {
+    if n == 0 { return 32; }
+    let c: u32 = 0;
+    let v: u32 = n;
+    while (v & 1) == 0 { v = v >> 1; c = c + 1; }
+    return c;
+}
+
+// Population count (number of set bits)
+pub fn popcount_u32(n: u32) -> u32 {
+    let v: u32 = n;
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    v = (v + (v >> 4)) & 0x0F0F0F0F;
+    return (v * 0x01010101) >> 24;
+}
+
+// Rotate left 32-bit
+pub fn rotl32(n: u32, shift: u32) -> u32 {
+    let s: u32 = shift & 31;
+    return (n << s) | (n >> (32 - s));
+}
+// Rotate right 32-bit
+pub fn rotr32(n: u32, shift: u32) -> u32 {
+    let s: u32 = shift & 31;
+    return (n >> s) | (n << (32 - s));
+}
+
+// ── Numeric utilities ─────────────────────────────────────────────────────────
+
+// Integer division rounding up
+pub fn div_ceil_u32(a: u32, b: u32) -> u32 { return (a + b - 1) / b; }
+pub fn div_ceil_u64(a: u64, b: u64) -> u64 { return (a + b - 1) / b; }
+
+// Align addr up to the nearest multiple of align (align must be power of two)
+pub fn align_up_u32(addr: u32, align: u32) -> u32 { return (addr + align - 1) & ~(align - 1); }
+pub fn align_down_u32(addr: u32, align: u32) -> u32 { return addr & ~(align - 1); }
+
+// Approximately equal (within epsilon)
+pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+    return abs_f64(a - b) <= eps;
+}
+
+// Linear interpolation
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 { return a + (b - a) * t; }
+
+// Map value from [in_lo, in_hi] → [out_lo, out_hi]
+pub fn map_range(v: f64, in_lo: f64, in_hi: f64, out_lo: f64, out_hi: f64) -> f64 {
+    return out_lo + (v - in_lo) * (out_hi - out_lo) / (in_hi - in_lo);
 }

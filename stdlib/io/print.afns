@@ -1,26 +1,71 @@
 package io.print;
 
-extern "C" fn printf(fmt: str) -> i32;
-extern "C" fn putchar(c: i32) -> i32;
-extern "C" fn puts(s: str) -> i32;
-extern "C" fn fflush(stream: *u8) -> i32;
+// Low-level C I/O bindings
+extern fn fputs(s: cstr, stream: *u8) -> i32;
+extern fn fputc(c: i32, stream: *u8) -> i32;
+extern fn fgets(buf: *u8, n: i32, stream: *u8) -> *u8;
+extern fn fflush(stream: *u8) -> i32;
+extern fn printf_i32(fmt: cstr, n: i32) -> i32;      // implemented via printf %d
+extern fn printf_i64(fmt: cstr, n: i64) -> i32;
+extern fn printf_u32(fmt: cstr, n: u32) -> i32;
+extern fn printf_u64(fmt: cstr, n: u64) -> i32;
+extern fn printf_f64(fmt: cstr, n: f64) -> i32;
 
-pub fn print(s: str) -> void {
-    puts(s);
-}
+// NightScript io runtime (always emitted by codegen)
+extern fn ns_io_print(s: cstr) -> void;
+extern fn ns_io_println(s: cstr) -> void;
+extern fn ns_io_eprint(s: cstr) -> void;
+extern fn ns_io_eprintln(s: cstr) -> void;
+extern fn ns_io_print_i32(n: i32) -> void;
+extern fn ns_io_print_i64(n: i64) -> void;
+extern fn ns_io_print_u32(n: u32) -> void;
+extern fn ns_io_print_u64(n: u64) -> void;
+extern fn ns_io_print_f64(n: f64) -> void;
+extern fn ns_io_print_bool(b: bool) -> void;
+extern fn ns_io_print_char(c: u8) -> void;
+extern fn ns_io_flush() -> void;
+extern fn ns_io_eflush() -> void;
+extern fn ns_io_readln() -> cstr;
+extern fn ns_io_read_i32() -> i32;
+extern fn ns_io_read_i64() -> i64;
+extern fn ns_io_read_u32() -> u32;
+extern fn ns_io_read_u64() -> u64;
+extern fn ns_io_read_f64() -> f64;
+extern fn ns_io_read_bool() -> bool;
 
-pub fn print_i32(x: i32) -> void {
-    printf("%d\n");
-}
+// ── stdout ────────────────────────────────────────────────────────────────────
 
-pub fn print_bool(b: bool) -> void {
-    if b {
-        puts("true");
-    } else {
-        puts("false");
-    }
-}
+pub fn print(s: cstr) -> void        { ns_io_print(s); }
+pub fn println(s: cstr) -> void      { ns_io_println(s); }
+pub fn print_i32(n: i32) -> void     { ns_io_print_i32(n); }
+pub fn print_i64(n: i64) -> void     { ns_io_print_i64(n); }
+pub fn print_u32(n: u32) -> void     { ns_io_print_u32(n); }
+pub fn print_u64(n: u64) -> void     { ns_io_print_u64(n); }
+pub fn print_f64(n: f64) -> void     { ns_io_print_f64(n); }
+pub fn print_bool(b: bool) -> void   { ns_io_print_bool(b); }
+pub fn print_char(c: u8) -> void     { ns_io_print_char(c); }
 
-pub fn newline() -> void {
-    putchar(10);
-}
+// Print a newline character.
+pub fn newline() -> void             { ns_io_print_char(10); }
+
+// Flush stdout.
+pub fn flush() -> void               { ns_io_flush(); }
+
+// ── stderr ────────────────────────────────────────────────────────────────────
+
+pub fn eprint(s: cstr) -> void       { ns_io_eprint(s); }
+pub fn eprintln(s: cstr) -> void     { ns_io_eprintln(s); }
+pub fn eflush() -> void              { ns_io_eflush(); }
+
+// ── stdin ─────────────────────────────────────────────────────────────────────
+
+// Read a line from stdin (strips trailing newline).
+// Returns a pointer to a static 4096-byte buffer — copy before next read.
+pub fn readln() -> cstr              { return ns_io_readln(); }
+
+pub fn read_i32() -> i32             { return ns_io_read_i32(); }
+pub fn read_i64() -> i64             { return ns_io_read_i64(); }
+pub fn read_u32() -> u32             { return ns_io_read_u32(); }
+pub fn read_u64() -> u64             { return ns_io_read_u64(); }
+pub fn read_f64() -> f64             { return ns_io_read_f64(); }
+pub fn read_bool() -> bool           { return ns_io_read_bool(); }

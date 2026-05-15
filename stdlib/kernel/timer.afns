@@ -1,0 +1,58 @@
+package kernel.timer;
+
+// PIT (Programmable Interval Timer, 8253/8254, IRQ 0) driver.
+// The kernel runtime (emitted by codegen) provides the ISR and ns_timer_* helpers.
+
+extern fn ns_timer_init(hz: u32) -> void;
+extern fn ns_timer_ticks() -> u32;
+extern fn ns_timer_wait(ms: u32) -> void;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Program the PIT at `hz` ticks per second (1–1193181 Hz).
+// The ISR increments a global tick counter on each IRQ0.
+pub fn init(hz: u32) -> void     { ns_timer_init(hz); }
+
+// Initialize at 1000 Hz — each tick equals exactly 1 ms.
+pub fn init_1ms() -> void        { ns_timer_init(1000); }
+
+// Initialize at 100 Hz — each tick equals 10 ms.
+pub fn init_10ms() -> void       { ns_timer_init(100); }
+
+// Get the raw tick counter (wraps around at 2^32).
+pub fn ticks() -> u32            { return ns_timer_ticks(); }
+
+// Busy-wait for approximately `ms` milliseconds.
+// Requires interrupts to be enabled and the PIT to be initialized.
+pub fn sleep_ms(ms: u32) -> void { ns_timer_wait(ms); }
+
+// Busy-wait for `s` whole seconds.
+pub fn sleep_secs(s: u32) -> void {
+    let i: u32 = 0;
+    while i < s {
+        ns_timer_wait(1000);
+        i = i + 1;
+    }
+}
+
+// Return how many ticks have elapsed since `start` (handles wrap-around).
+pub fn elapsed(start: u32) -> u32 {
+    return ns_timer_ticks() - start;
+}
+
+// ── PIT frequency constants ───────────────────────────────────────────────────
+
+const PIT_BASE_HZ: u32 = 1193182;  // PIT input clock frequency (Hz)
+
+const HZ_18:    u32 = 18;     // BIOS default (~18.2 Hz)
+const HZ_50:    u32 = 50;     // 20 ms per tick
+const HZ_100:   u32 = 100;    // 10 ms per tick
+const HZ_250:   u32 = 250;    //  4 ms per tick
+const HZ_500:   u32 = 500;    //  2 ms per tick
+const HZ_1000:  u32 = 1000;   //  1 ms per tick
+const HZ_2000:  u32 = 2000;   //  0.5 ms per tick
+
+// ── PIT command / mode constants ──────────────────────────────────────────────
+
+const PIT_CH0_LOHBYTE: u8 = 0x36;  // channel 0, lobyte/hibyte, mode 3 (square wave)
+const PIT_CH2_LOHBYTE: u8 = 0xB6;  // channel 2, lobyte/hibyte, mode 3 (PC speaker)

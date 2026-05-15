@@ -1,0 +1,50 @@
+package std.path;
+
+// NightScript codegen runtime (emitted by emit_stdlib_runtime)
+extern fn ns_path_join(a: cstr, b: cstr) -> cstr;
+extern fn ns_path_basename(p: cstr) -> cstr;
+extern fn ns_path_dirname(p: cstr) -> cstr;
+extern fn ns_path_extension(p: cstr) -> cstr;
+extern fn ns_path_exists(p: cstr) -> bool;
+extern fn ns_path_is_dir(p: cstr) -> bool;
+extern fn ns_path_is_file(p: cstr) -> bool;
+extern fn ns_path_is_absolute(p: cstr) -> bool;
+extern fn ns_path_absolute(p: cstr) -> cstr;
+
+// ── Join / split ──────────────────────────────────────────────────────────────
+
+// Join two path segments with "/" between them (handles trailing slash on a).
+// Result is in a static buffer — copy if you need to keep it.
+pub fn join(a: cstr, b: cstr) -> cstr { return ns_path_join(a, b); }
+
+// The filename portion of a path (everything after the last '/').
+pub fn basename(p: cstr) -> cstr { return ns_path_basename(p); }
+
+// The directory portion of a path (everything up to but not including the last '/').
+// Returns "." for paths with no directory component.
+pub fn dirname(p: cstr) -> cstr { return ns_path_dirname(p); }
+
+// The file extension including the leading '.', or "" if none.
+// e.g. "foo.tar.gz" → ".gz"
+pub fn extension(p: cstr) -> cstr { return ns_path_extension(p); }
+
+// ── Predicates ────────────────────────────────────────────────────────────────
+
+// True if the path exists (file, directory, symlink, etc.).
+pub fn exists(p: cstr) -> bool { return ns_path_exists(p); }
+
+// True if the path exists and is a regular file.
+pub fn is_file(p: cstr) -> bool { return ns_path_is_file(p); }
+
+// True if the path exists and is a directory.
+pub fn is_dir(p: cstr) -> bool { return ns_path_is_dir(p); }
+
+// True if the path starts with '/' (i.e. is an absolute path on POSIX).
+pub fn is_absolute(p: cstr) -> bool { return ns_path_is_absolute(p); }
+
+// ── Canonicalization ──────────────────────────────────────────────────────────
+
+// Resolve symlinks and normalize ".." / "." components.
+// Returns p unchanged if resolution fails (e.g. path does not exist).
+// Result is in a static buffer — copy if you need to keep it.
+pub fn absolute(p: cstr) -> cstr { return ns_path_absolute(p); }

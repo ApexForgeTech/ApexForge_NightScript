@@ -1,0 +1,13 @@
+// std.time — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package std.time;
+
+pub fn now_secs() -> i64;
+pub fn now_ms() -> u64;
+pub fn now_us() -> u64;
+pub fn sleep_ms(ms: u32) -> void;
+pub fn sleep_us(us: u64) -> void;
+pub fn sleep_secs(s: u32) -> void;
+pub fn elapsed_ms(start: u64) -> u64;
+pub fn elapsed_us(start: u64) -> u64;

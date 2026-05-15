@@ -1,0 +1,39 @@
+package std.time;
+
+// NightScript codegen runtime helpers (emitted by emit_stdlib_runtime)
+extern fn ns_time_now_secs() -> i64;
+extern fn ns_time_now_ms() -> u64;
+extern fn ns_time_now_us() -> u64;
+extern fn ns_time_sleep_ms(ms: u32) -> void;
+extern fn ns_time_sleep_us(us: u64) -> void;
+extern fn ns_time_sleep_secs(s: u32) -> void;
+
+// ── Clock reads ───────────────────────────────────────────────────────────────
+
+// Current Unix time in whole seconds.
+pub fn now_secs() -> i64  { return ns_time_now_secs(); }
+
+// Monotonic time in milliseconds since some unspecified epoch.
+pub fn now_ms() -> u64    { return ns_time_now_ms(); }
+
+// Monotonic time in microseconds.
+pub fn now_us() -> u64    { return ns_time_now_us(); }
+
+// ── Sleep ─────────────────────────────────────────────────────────────────────
+
+// Sleep for at least ms milliseconds.
+pub fn sleep_ms(ms: u32) -> void   { ns_time_sleep_ms(ms); }
+
+// Sleep for at least us microseconds.
+pub fn sleep_us(us: u64) -> void   { ns_time_sleep_us(us); }
+
+// Sleep for at least s whole seconds.
+pub fn sleep_secs(s: u32) -> void  { ns_time_sleep_secs(s); }
+
+// ── Elapsed time helpers ──────────────────────────────────────────────────────
+
+// Return how many milliseconds have passed since `start` (from now_ms()).
+pub fn elapsed_ms(start: u64) -> u64  { return ns_time_now_ms() - start; }
+
+// Return how many microseconds have passed since `start` (from now_us()).
+pub fn elapsed_us(start: u64) -> u64  { return ns_time_now_us() - start; }

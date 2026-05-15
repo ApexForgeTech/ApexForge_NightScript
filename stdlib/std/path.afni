@@ -1,0 +1,14 @@
+// std.path — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package std.path;
+
+pub fn join(a: cstr, b: cstr) -> cstr;
+pub fn basename(p: cstr) -> cstr;
+pub fn dirname(p: cstr) -> cstr;
+pub fn extension(p: cstr) -> cstr;
+pub fn exists(p: cstr) -> bool;
+pub fn is_file(p: cstr) -> bool;
+pub fn is_dir(p: cstr) -> bool;
+pub fn is_absolute(p: cstr) -> bool;
+pub fn absolute(p: cstr) -> cstr;

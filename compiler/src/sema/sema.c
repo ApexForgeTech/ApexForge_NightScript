@@ -266,7 +266,7 @@ static int is_builtin_type(const char *name) {
     return 0;
 }
 
-/* Built-in I/O functions — always available without import or extern */
+/* Built-in functions — always available without import or extern */
 static int is_builtin_io(const char *name) {
     static const char *IO[] = {
         /* stdout */
@@ -282,6 +282,10 @@ static int is_builtin_io(const char *name) {
         "input", "read_int", "read_long", "read_uint", "read_f64",
         /* stream objects */
         "stdout", "stderr", "stdin",
+        /* inline assembly */
+        "asm",
+        /* kernel port I/O */
+        "inb", "outb", "inw", "outw", "inl", "outl", "io_wait",
         NULL
     };
     for (int i = 0; IO[i]; i++)

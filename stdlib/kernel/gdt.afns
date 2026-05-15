@@ -1,0 +1,66 @@
+package kernel.gdt;
+
+// GDT (Global Descriptor Table) management.
+// The kernel runtime (emitted by codegen) provides the ns_gdt_* implementations.
+
+extern fn ns_gdt_init() -> void;
+extern fn ns_gdt_set(idx: i32, base: u32, limit: u32, access: u8, gran: u8) -> void;
+extern fn ns_gdt_install() -> void;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Initialize a flat 5-entry GDT:
+//   0 = null descriptor
+//   1 = code ring-0 (base 0, limit 4 GB)
+//   2 = data ring-0 (base 0, limit 4 GB)
+//   3 = code ring-3 (base 0, limit 4 GB)
+//   4 = data ring-3 (base 0, limit 4 GB)
+pub fn init() -> void { ns_gdt_init(); }
+
+// Configure a single GDT entry (index 0–7 in the default 8-entry table).
+pub fn set_entry(idx: i32, base: u32, limit: u32, access: u8, gran: u8) -> void {
+    ns_gdt_set(idx, base, limit, access, gran);
+}
+
+// Write the GDTR and reload all segment registers (far jump to flush CS).
+pub fn install() -> void { ns_gdt_install(); }
+
+// ── Access byte constants ─────────────────────────────────────────────────────
+//
+// Format: P | DPL[1:0] | S | Type[3:0]
+//   P   = 1 (present)
+//   DPL = descriptor privilege level (0 = ring 0, 3 = ring 3)
+//   S   = 1 for code/data, 0 for system (TSS, LDT, …)
+//   Type bits for code:  [3]=1 (code), [2]=C (conforming), [1]=R (readable), [0]=A
+//   Type bits for data:  [3]=0 (data), [2]=E (expand-down), [1]=W (writable), [0]=A
+
+const ACCESS_CODE_RING0: u8 = 0x9A;  // present, ring0, code, readable
+const ACCESS_DATA_RING0: u8 = 0x92;  // present, ring0, data, writable
+const ACCESS_CODE_RING3: u8 = 0xFA;  // present, ring3, code, readable
+const ACCESS_DATA_RING3: u8 = 0xF2;  // present, ring3, data, writable
+const ACCESS_TSS:        u8 = 0x89;  // present, ring0, 32-bit available TSS
+const ACCESS_NULL:       u8 = 0x00;  // null descriptor
+
+// ── Granularity / size byte constants ─────────────────────────────────────────
+//
+// High nibble of byte 6 in the GDT entry:
+//   G   = 1 → limit granularity is 4 KB pages (else bytes)
+//   D/B = 1 → 32-bit segment (else 16-bit)
+//   L   = 0 → 32-bit (set 1 for 64-bit code, not used in kernel.gdt)
+//   AVL = 0 (available for OS use)
+
+const GRAN_4K_32BIT: u8 = 0xCF;  // 4 KB granularity, 32-bit protected mode
+const GRAN_BYTE_16BIT: u8 = 0x00; // byte granularity, 16-bit real mode
+const GRAN_4K_16BIT: u8 = 0x80;  // 4 KB granularity, 16-bit
+
+// ── Segment selector constants ────────────────────────────────────────────────
+//
+// A selector encodes: index[15:3] | TI[2] | RPL[1:0]
+//   TI=0 → GDT, TI=1 → LDT, RPL = requested privilege level
+
+const SEL_NULL:       u16 = 0x0000;
+const SEL_KCODE:      u16 = 0x0008;  // GDT[1] ring-0 code
+const SEL_KDATA:      u16 = 0x0010;  // GDT[2] ring-0 data
+const SEL_UCODE:      u16 = 0x001B;  // GDT[3] ring-3 code (RPL=3)
+const SEL_UDATA:      u16 = 0x0023;  // GDT[4] ring-3 data (RPL=3)
+const SEL_TSS:        u16 = 0x0028;  // GDT[5] TSS selector

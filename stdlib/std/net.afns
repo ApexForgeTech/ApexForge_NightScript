@@ -1,34 +1,136 @@
 package std.net;
 
-extern "C" fn socket(domain: i32, type: i32, proto: i32) -> i32;
-extern "C" fn bind(fd: i32, addr: *u8, len: u32) -> i32;
-extern "C" fn listen(fd: i32, backlog: i32) -> i32;
-extern "C" fn accept(fd: i32, addr: *u8, len: *u32) -> i32;
-extern "C" fn connect(fd: i32, addr: *u8, len: u32) -> i32;
-extern "C" fn send(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
-extern "C" fn recv(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
-extern "C" fn close(fd: i32) -> i32;
+// POSIX socket API
+extern fn socket(domain: i32, sock_type: i32, proto: i32) -> i32;
+extern fn bind(fd: i32, addr: *u8, len: u32) -> i32;
+extern fn listen(fd: i32, backlog: i32) -> i32;
+extern fn accept(fd: i32, addr: *u8, len: *u32) -> i32;
+extern fn connect(fd: i32, addr: *u8, len: u32) -> i32;
+extern fn send(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
+extern fn recv(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
+extern fn sendto(fd: i32, buf: *u8, len: usize, flags: i32, addr: *u8, alen: u32) -> i64;
+extern fn recvfrom(fd: i32, buf: *u8, len: usize, flags: i32, addr: *u8, alen: *u32) -> i64;
+extern fn shutdown(fd: i32, how: i32) -> i32;
+extern fn close(fd: i32) -> i32;
+extern fn setsockopt(fd: i32, level: i32, optname: i32, optval: *u8, optlen: u32) -> i32;
+extern fn getsockopt(fd: i32, level: i32, optname: i32, optval: *u8, optlen: *u32) -> i32;
+extern fn htons(port: u16) -> u16;
+extern fn htonl(addr: u32) -> u32;
+extern fn ntohs(port: u16) -> u16;
+extern fn ntohl(addr: u32) -> u32;
+extern fn inet_addr(cp: cstr) -> u32;
 
+// ── Address family constants ──────────────────────────────────────────────────
+
+const AF_UNIX:  i32 = 1;
 const AF_INET:  i32 = 2;
-const SOCK_STREAM: i32 = 1;
-const SOCK_DGRAM:  i32 = 2;
+const AF_INET6: i32 = 10;
 
-pub fn tcp_socket() -> i32 {
-    return socket(AF_INET, SOCK_STREAM, 0);
-}
+// ── Socket type constants ─────────────────────────────────────────────────────
 
-pub fn udp_socket() -> i32 {
-    return socket(AF_INET, SOCK_DGRAM, 0);
-}
+const SOCK_STREAM:    i32 = 1;   // TCP
+const SOCK_DGRAM:     i32 = 2;   // UDP
+const SOCK_RAW:       i32 = 3;
+const SOCK_NONBLOCK:  i32 = 2048;
+const SOCK_CLOEXEC:   i32 = 524288;
+
+// ── Protocol constants ────────────────────────────────────────────────────────
+
+const IPPROTO_TCP: i32 = 6;
+const IPPROTO_UDP: i32 = 17;
+const IPPROTO_RAW: i32 = 255;
+
+// ── SOL_SOCKET option level ───────────────────────────────────────────────────
+
+const SOL_SOCKET:    i32 = 1;
+const IPPROTO_IP:    i32 = 0;
+
+// ── Socket options ────────────────────────────────────────────────────────────
+
+const SO_REUSEADDR:  i32 = 2;
+const SO_REUSEPORT:  i32 = 15;
+const SO_KEEPALIVE:  i32 = 9;
+const SO_RCVBUF:     i32 = 8;
+const SO_SNDBUF:     i32 = 7;
+const SO_RCVTIMEO:   i32 = 20;
+const SO_SNDTIMEO:   i32 = 21;
+const SO_ERROR:      i32 = 4;
+const TCP_NODELAY:   i32 = 1;   // under IPPROTO_TCP level
+
+// ── Shutdown modes ────────────────────────────────────────────────────────────
+
+const SHUT_RD:   i32 = 0;
+const SHUT_WR:   i32 = 1;
+const SHUT_RDWR: i32 = 2;
+
+// ── Send / recv flags ─────────────────────────────────────────────────────────
+
+const MSG_DONTWAIT: i32 = 64;
+const MSG_PEEK:     i32 = 2;
+const MSG_WAITALL:  i32 = 256;
+const MSG_NOSIGNAL: i32 = 16384;
+
+// ── Special addresses ─────────────────────────────────────────────────────────
+
+const INADDR_ANY:       u32 = 0x00000000;
+const INADDR_LOOPBACK:  u32 = 0x7F000001;  // 127.0.0.1
+const INADDR_BROADCAST: u32 = 0xFFFFFFFF;
+
+// ── Socket creation helpers ───────────────────────────────────────────────────
+
+pub fn tcp_socket() -> i32  { return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); }
+pub fn udp_socket() -> i32  { return socket(AF_INET, SOCK_DGRAM,  IPPROTO_UDP); }
+pub fn raw_socket(proto: i32) -> i32 { return socket(AF_INET, SOCK_RAW, proto); }
+
+// ── Send / receive wrappers ───────────────────────────────────────────────────
 
 pub fn tcp_send(fd: i32, buf: *u8, len: usize) -> i64 {
-    return send(fd, buf, len, 0);
+    return send(fd, buf, len, MSG_NOSIGNAL);
 }
-
 pub fn tcp_recv(fd: i32, buf: *u8, len: usize) -> i64 {
     return recv(fd, buf, len, 0);
 }
-
-pub fn tcp_close(fd: i32) -> i32 {
-    return close(fd);
+pub fn udp_send(fd: i32, buf: *u8, len: usize, addr: *u8, alen: u32) -> i64 {
+    return sendto(fd, buf, len, 0, addr, alen);
 }
+pub fn udp_recv(fd: i32, buf: *u8, len: usize, addr: *u8, alen: *u32) -> i64 {
+    return recvfrom(fd, buf, len, 0, addr, alen);
+}
+
+// ── Connection helpers ────────────────────────────────────────────────────────
+
+pub fn tcp_listen(fd: i32, backlog: i32) -> i32 { return listen(fd, backlog); }
+pub fn tcp_accept(fd: i32, addr: *u8, alen: *u32) -> i32 { return accept(fd, addr, alen); }
+pub fn tcp_connect(fd: i32, addr: *u8, alen: u32) -> i32 { return connect(fd, addr, alen); }
+pub fn tcp_bind(fd: i32, addr: *u8, alen: u32) -> i32    { return bind(fd, addr, alen); }
+
+pub fn tcp_shutdown_rd(fd: i32) -> i32   { return shutdown(fd, SHUT_RD); }
+pub fn tcp_shutdown_wr(fd: i32) -> i32   { return shutdown(fd, SHUT_WR); }
+pub fn tcp_shutdown_all(fd: i32) -> i32  { return shutdown(fd, SHUT_RDWR); }
+pub fn tcp_close(fd: i32) -> i32         { return close(fd); }
+
+// ── Socket options ────────────────────────────────────────────────────────────
+
+// Enable SO_REUSEADDR (pass a pointer to an i32 value of 1).
+pub fn set_reuseaddr(fd: i32, val: *u8) -> i32 {
+    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, val, 4);
+}
+pub fn set_reuseport(fd: i32, val: *u8) -> i32 {
+    return setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, val, 4);
+}
+pub fn set_tcp_nodelay(fd: i32, val: *u8) -> i32 {
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, val, 4);
+}
+pub fn set_keepalive(fd: i32, val: *u8) -> i32 {
+    return setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, val, 4);
+}
+
+// ── Byte-order helpers ────────────────────────────────────────────────────────
+
+pub fn host_to_net16(x: u16) -> u16 { return htons(x); }
+pub fn net_to_host16(x: u16) -> u16 { return ntohs(x); }
+pub fn host_to_net32(x: u32) -> u32 { return htonl(x); }
+pub fn net_to_host32(x: u32) -> u32 { return ntohl(x); }
+
+// Convert dotted-decimal string to 32-bit network-byte-order address.
+pub fn parse_ipv4(s: cstr) -> u32   { return inet_addr(s); }

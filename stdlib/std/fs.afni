@@ -1,0 +1,31 @@
+// std.fs — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package std.fs;
+
+const SEEK_SET: i32;
+const SEEK_CUR: i32;
+const SEEK_END: i32;
+
+pub fn open(path: cstr, mode: cstr) -> *u8;
+pub fn close(fp: *u8) -> i32;
+pub fn read(fp: *u8, buf: *u8, count: usize) -> usize;
+pub fn read_char(fp: *u8) -> i32;
+pub fn read_line(fp: *u8, buf: *u8, n: i32) -> *u8;
+pub fn write(fp: *u8, buf: *u8, count: usize) -> usize;
+pub fn write_str(fp: *u8, s: cstr) -> i32;
+pub fn seek(fp: *u8, offset: i64, whence: i32) -> i32;
+pub fn seek_start(fp: *u8, offset: i64) -> i32;
+pub fn seek_cur(fp: *u8, offset: i64) -> i32;
+pub fn seek_end(fp: *u8, offset: i64) -> i32;
+pub fn tell(fp: *u8) -> i64;
+pub fn rewind_fp(fp: *u8) -> void;
+pub fn size(fp: *u8) -> i64;
+pub fn flush(fp: *u8) -> i32;
+pub fn is_eof(fp: *u8) -> bool;
+pub fn has_error(fp: *u8) -> bool;
+pub fn clear_error(fp: *u8) -> void;
+pub fn delete(path: cstr) -> i32;
+pub fn move(old_path: cstr, new_path: cstr) -> i32;
+pub fn mkdir(path: cstr) -> i32;
+pub fn rmdir(path: cstr) -> i32;

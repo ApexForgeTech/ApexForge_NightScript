@@ -1,0 +1,40 @@
+// core.convert — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package core.convert;
+
+pub fn str_to_i32(s: cstr) -> i32;
+pub fn str_to_i64(s: cstr) -> i64;
+pub fn str_to_f64(s: cstr) -> f64;
+pub fn str_to_u32(s: cstr) -> u32;
+pub fn str_to_u64(s: cstr) -> u64;
+pub fn hex_to_u32(s: cstr) -> u32;
+pub fn hex_to_u64(s: cstr) -> u64;
+pub fn str_to_bool(s: cstr) -> bool;
+pub fn i32_to_str(n: i32) -> cstr;
+pub fn i64_to_str(n: i64) -> cstr;
+pub fn u32_to_str(n: u32) -> cstr;
+pub fn u64_to_str(n: u64) -> cstr;
+pub fn f64_to_str(n: f64) -> cstr;
+pub fn i32_to_hex(n: i32) -> cstr;
+pub fn u32_to_hex(n: u32) -> cstr;
+pub fn bool_to_str(b: bool) -> cstr;
+pub fn i32_to_bool(x: i32) -> bool;
+pub fn bool_to_i32(b: bool) -> i32;
+pub fn i32_to_i64(x: i32) -> i64;
+pub fn i64_to_i32(x: i64) -> i32;
+pub fn i32_to_u32(x: i32) -> u32;
+pub fn u32_to_i32(x: u32) -> i32;
+pub fn i32_to_f64(x: i32) -> f64;
+pub fn f64_to_i32(x: f64) -> i32;
+pub fn f64_to_f32(x: f64) -> f32;
+pub fn u8_to_i32(x: u8) -> i32;
+pub fn i32_to_u8(x: i32) -> u8;
+pub fn is_digit(c: u8) -> bool;
+pub fn is_alpha(c: u8) -> bool;
+pub fn is_alnum(c: u8) -> bool;
+pub fn is_space(c: u8) -> bool;
+pub fn to_lower(c: u8) -> u8;
+pub fn to_upper(c: u8) -> u8;
+pub fn digit_val(c: u8) -> u8;
+pub fn digit_char(v: u8) -> u8;

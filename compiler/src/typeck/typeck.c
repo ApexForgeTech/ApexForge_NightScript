@@ -1619,6 +1619,16 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                     return &TYPE_U32_VALUE;
                 if (!strcmp(nm, "read_f64"))
                     return &TYPE_F64_VALUE;
+                /* inline assembly — asm("instruction") → void */
+                if (!strcmp(nm, "asm"))
+                    return &TYPE_VOID_VALUE;
+                /* port I/O built-ins */
+                if (!strcmp(nm, "outb") || !strcmp(nm, "outw") ||
+                    !strcmp(nm, "outl") || !strcmp(nm, "io_wait"))
+                    return &TYPE_VOID_VALUE;
+                if (!strcmp(nm, "inb"))  return &TYPE_U8_VALUE;
+                if (!strcmp(nm, "inw"))  return &TYPE_U16_VALUE;
+                if (!strcmp(nm, "inl"))  return &TYPE_U32_VALUE;
             }
             /* stream method calls: stdout.flush(), stderr.flush(), stdin.read_line() */
             if (callee->kind == NODE_FIELD) {

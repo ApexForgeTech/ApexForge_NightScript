@@ -1,0 +1,20 @@
+// core.mem — Public API signatures
+// ApexForge NightScript Interface (.afni)
+
+package core.mem;
+
+pub fn copy(dst: *u8, src: *u8, n: usize) -> void;
+pub fn copy_overlap(dst: *u8, src: *u8, n: usize) -> void;
+pub fn fill(ptr: *u8, byte: u8, n: usize) -> void;
+pub fn zero(ptr: *u8, n: usize) -> void;
+pub fn compare(a: *u8, b: *u8, n: usize) -> i32;
+pub fn eq(a: *u8, b: *u8, n: usize) -> bool;
+pub fn alloc(size: usize) -> *u8;
+pub fn alloc_zeroed(size: usize) -> *u8;
+pub fn resize(ptr: *u8, new_size: usize) -> *u8;
+pub fn dup(src: *u8, n: usize) -> *u8;
+pub fn dealloc(ptr: *u8) -> void;
+pub fn is_null(ptr: *u8) -> bool;
+pub fn align_up(addr: usize, align: usize) -> usize;
+pub fn align_down(addr: usize, align: usize) -> usize;
+pub fn is_aligned(addr: usize, align: usize) -> bool;

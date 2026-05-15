@@ -1,0 +1,27 @@
+// std.io — Public API signatures
+// ApexForge NightScript Interface (.afni)
+// Generated from: stdlib/std/io.afns
+
+package std.io;
+
+pub fn print(s: cstr) -> void;
+pub fn println(s: cstr) -> void;
+pub fn eprint(s: cstr) -> void;
+pub fn eprintln(s: cstr) -> void;
+pub fn print_int(n: i32) -> void;
+pub fn print_long(n: i64) -> void;
+pub fn print_uint(n: u32) -> void;
+pub fn print_ulong(n: u64) -> void;
+pub fn print_f64(n: f64) -> void;
+pub fn print_bool(b: bool) -> void;
+pub fn print_char(c: u8) -> void;
+pub fn newline() -> void;
+pub fn flush() -> void;
+pub fn eflush() -> void;
+pub fn readln() -> cstr;
+pub fn read_int() -> i32;
+pub fn read_long() -> i64;
+pub fn read_uint() -> u32;
+pub fn read_ulong() -> u64;
+pub fn read_f64() -> f64;
+pub fn read_bool() -> bool;

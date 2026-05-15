@@ -2054,6 +2054,33 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
                 if (!strcmp(nm, "read_long")) { emit(o, "ns_io_read_i64()");  break; }
                 if (!strcmp(nm, "read_uint")) { emit(o, "ns_io_read_u32()");  break; }
                 if (!strcmp(nm, "read_f64"))  { emit(o, "ns_io_read_f64()");  break; }
+                /* inline assembly: asm("instruction") → __asm__ volatile("instruction") */
+                if (!strcmp(nm, "asm") && a0 && a0->kind == NODE_LIT_STRING) {
+                    emit(o, "__asm__ volatile(\"");
+                    for (const char *cp = a0->as.lit_str.value; *cp; cp++) {
+                        if (*cp == '"') emit(o, "\\\"");
+                        else emit(o, "%c", *cp);
+                    }
+                    emit(o, "\")");
+                    break;
+                }
+                /* port I/O built-ins */
+                if (!strcmp(nm, "inb"))  { emit(o, "ns_inb");  _IO_ARG0; break; }
+                if (!strcmp(nm, "inw"))  { emit(o, "ns_inw");  _IO_ARG0; break; }
+                if (!strcmp(nm, "inl"))  { emit(o, "ns_inl");  _IO_ARG0; break; }
+                if (!strcmp(nm, "io_wait")) { emit(o, "ns_io_wait()"); break; }
+                if (!strcmp(nm, "outb") && n->as.call.args.count == 2) {
+                    emit(o, "ns_outb("); emit_expr(o, cg, n->as.call.args.items[0]);
+                    emit(o, ", "); emit_expr(o, cg, n->as.call.args.items[1]); emit(o, ")"); break;
+                }
+                if (!strcmp(nm, "outw") && n->as.call.args.count == 2) {
+                    emit(o, "ns_outw("); emit_expr(o, cg, n->as.call.args.items[0]);
+                    emit(o, ", "); emit_expr(o, cg, n->as.call.args.items[1]); emit(o, ")"); break;
+                }
+                if (!strcmp(nm, "outl") && n->as.call.args.count == 2) {
+                    emit(o, "ns_outl("); emit_expr(o, cg, n->as.call.args.items[0]);
+                    emit(o, ", "); emit_expr(o, cg, n->as.call.args.items[1]); emit(o, ")"); break;
+                }
 #undef _IO_ARG0
             }
             /* stream method calls: stdout.flush(), stderr.flush(),
@@ -2671,6 +2698,11 @@ static void emit_standard_headers(COut *o, Node *prog) {
         }
     }
 
+    /* POSIX/XSI extensions — must come before any system header.
+     * _XOPEN_SOURCE 700 enables POSIX.1-2008 + XSI (exposes realpath,
+     * nanosleep, etc. even under -std=c11). */
+    emit(o, "#ifndef _XOPEN_SOURCE\n#define _XOPEN_SOURCE 700\n#endif\n");
+    emit(o, "#ifndef _POSIX_C_SOURCE\n#define _POSIX_C_SOURCE 200809L\n#endif\n");
     emit(o, "#include <stdbool.h>\n");
     emit(o, "#include <stddef.h>\n");
     emit(o, "#include <stdint.h>\n");
@@ -3166,6 +3198,149 @@ static void emit_ui_handlers(COut *o, Node *elem, Node *prog, int *counter) {
         emit_ui_handlers(o, elem->as.ui_element.children.items[i], prog, counter);
 }
 
+/* ── std.path / std.time runtime (always emitted for native apps) ─────────── */
+static void emit_stdlib_runtime(COut *o) {
+    emit(o, "/* ════════════════════════════════════════════════════════════\n");
+    emit(o, "   NightScript stdlib runtime — emitted by codegen (do not edit)\n");
+    emit(o, "   ════════════════════════════════════════════════════════════ */\n\n");
+
+    emit(o, "#include <time.h>\n");
+    emit(o, "#include <math.h>\n");
+    emit(o, "#include <sys/stat.h>\n");
+    emit(o, "#ifdef _WIN32\n#include <direct.h>\n#else\n#include <unistd.h>\n#endif\n\n");
+
+    /* ── std.time ─────────────────────────────────────────────────────────── */
+    emit(o, "/* std.time */\n");
+    emit(o, "static inline int64_t ns_time_now_secs(void) { return (int64_t)time((void*)0); }\n");
+    emit(o, "static inline uint64_t ns_time_now_ms(void) {\n");
+    emit(o, "#if defined(CLOCK_MONOTONIC)\n");
+    emit(o, "    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC,&_ts);\n");
+    emit(o, "    return (uint64_t)_ts.tv_sec*1000ULL+(uint64_t)(_ts.tv_nsec/1000000);\n");
+    emit(o, "#else\n    return (uint64_t)((double)clock()*1000.0/CLOCKS_PER_SEC);\n#endif\n}\n");
+    emit(o, "static inline uint64_t ns_time_now_us(void) {\n");
+    emit(o, "#if defined(CLOCK_MONOTONIC)\n");
+    emit(o, "    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC,&_ts);\n");
+    emit(o, "    return (uint64_t)_ts.tv_sec*1000000ULL+(uint64_t)(_ts.tv_nsec/1000);\n");
+    emit(o, "#else\n    return (uint64_t)((double)clock()*1000000.0/CLOCKS_PER_SEC);\n#endif\n}\n");
+    emit(o, "static inline void ns_time_sleep_ms(uint32_t ms) {\n");
+    emit(o, "#if defined(_POSIX_VERSION)\n");
+    emit(o, "    struct timespec _ts; _ts.tv_sec=ms/1000; _ts.tv_nsec=(long)((ms%%1000)*1000000L);\n");
+    emit(o, "    nanosleep(&_ts,(void*)0);\n");
+    emit(o, "#else\n    (void)ms;\n#endif\n}\n");
+    emit(o, "static inline void ns_time_sleep_us(uint64_t us) {\n");
+    emit(o, "#if defined(_POSIX_VERSION)\n");
+    emit(o, "    struct timespec _ts; _ts.tv_sec=(time_t)(us/1000000ULL);\n");
+    emit(o, "    _ts.tv_nsec=(long)((us%%1000000ULL)*1000ULL);\n");
+    emit(o, "    nanosleep(&_ts,(void*)0);\n");
+    emit(o, "#else\n    (void)us;\n#endif\n}\n");
+    emit(o, "static inline void ns_time_sleep_secs(uint32_t s) { ns_time_sleep_ms(s*1000u); }\n\n");
+
+    /* ── core.math (float functions via libm) ─────────────────────────────── */
+    emit(o, "/* core.math — float */\n");
+    emit(o, "static inline double ns_math_sqrt(double x)         { return sqrt(x); }\n");
+    emit(o, "static inline double ns_math_fabs(double x)         { return fabs(x); }\n");
+    emit(o, "static inline double ns_math_floor(double x)        { return floor(x); }\n");
+    emit(o, "static inline double ns_math_ceil(double x)         { return ceil(x); }\n");
+    emit(o, "static inline double ns_math_round(double x)        { return round(x); }\n");
+    emit(o, "static inline double ns_math_fmod(double x, double y){ return fmod(x,y); }\n");
+    emit(o, "static inline double ns_math_sin(double x)          { return sin(x); }\n");
+    emit(o, "static inline double ns_math_cos(double x)          { return cos(x); }\n");
+    emit(o, "static inline double ns_math_tan(double x)          { return tan(x); }\n");
+    emit(o, "static inline double ns_math_asin(double x)         { return asin(x); }\n");
+    emit(o, "static inline double ns_math_acos(double x)         { return acos(x); }\n");
+    emit(o, "static inline double ns_math_atan(double x)         { return atan(x); }\n");
+    emit(o, "static inline double ns_math_atan2(double y,double x){ return atan2(y,x); }\n");
+    emit(o, "static inline double ns_math_log(double x)          { return log(x); }\n");
+    emit(o, "static inline double ns_math_log2(double x)         { return log2(x); }\n");
+    emit(o, "static inline double ns_math_log10(double x)        { return log10(x); }\n");
+    emit(o, "static inline double ns_math_exp(double x)          { return exp(x); }\n");
+    emit(o, "static inline double ns_math_pow(double b,double e)  { return pow(b,e); }\n\n");
+
+    /* ── core.convert (number → string) ──────────────────────────────────── */
+    emit(o, "/* core.convert */\n");
+    emit(o, "static char _ns_conv_buf[8][64];\n");
+    emit(o, "static int  _ns_conv_idx = 0;\n");
+    emit(o, "static inline char *_ns_conv_next(void) {\n");
+    emit(o, "    char *b = _ns_conv_buf[_ns_conv_idx %% 8]; _ns_conv_idx++; return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_i32_to_str(int32_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"%%d\",n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_i64_to_str(int64_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"%%lld\",(long long)n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_u32_to_str(uint32_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"%%u\",n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_u64_to_str(uint64_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"%%llu\",(unsigned long long)n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_f64_to_str(double n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"%%g\",n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_i32_to_hex(int32_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"0x%%x\",(unsigned)n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_u32_to_hex(uint32_t n) {\n");
+    emit(o, "    char *b=_ns_conv_next(); snprintf(b,64,\"0x%%x\",n); return b;\n}\n");
+    emit(o, "static inline const char *ns_conv_bool_to_str(int b) {\n");
+    emit(o, "    return b ? \"true\" : \"false\";\n}\n\n");
+
+    /* ── std.path ─────────────────────────────────────────────────────────── */
+    emit(o, "/* std.path */\n");
+    emit(o, "static char _ns_path_buf[4096];\n");
+    emit(o, "static char _ns_path_dir[4096];\n");
+    emit(o, "static char _ns_path_abs[4096];\n");
+    emit(o, "static inline const char *ns_path_join(const char *a, const char *b) {\n");
+    emit(o, "    int la=(int)strlen(a), sep=(la>0&&a[la-1]!='/');\n");
+    emit(o, "    snprintf(_ns_path_buf,sizeof(_ns_path_buf),\"%%s%%s%%s\",a,sep?\"/\":\"\",b);\n");
+    emit(o, "    return _ns_path_buf;\n}\n");
+    emit(o, "static inline const char *ns_path_basename(const char *p) {\n");
+    emit(o, "    const char *s=strrchr(p,'/'); return s ? s+1 : p;\n}\n");
+    emit(o, "static inline const char *ns_path_dirname(const char *p) {\n");
+    emit(o, "    int n=(int)strlen(p);\n");
+    emit(o, "    while(n>0&&p[n-1]!='/') n--;\n");
+    emit(o, "    if(n==0){_ns_path_dir[0]='.';_ns_path_dir[1]='\\0';return _ns_path_dir;}\n");
+    emit(o, "    snprintf(_ns_path_dir,sizeof(_ns_path_dir),\"%%.*s\",n-1,p); return _ns_path_dir;\n}\n");
+    emit(o, "static inline const char *ns_path_extension(const char *p) {\n");
+    emit(o, "    const char *d=strrchr(p,'.'); return d?d:\"\";\n}\n");
+    emit(o, "static inline _Bool ns_path_exists(const char *p) {\n");
+    emit(o, "    struct stat st; return stat(p,&st)==0;\n}\n");
+    emit(o, "static inline _Bool ns_path_is_dir(const char *p) {\n");
+    emit(o, "    struct stat st; return stat(p,&st)==0&&S_ISDIR(st.st_mode);\n}\n");
+    emit(o, "static inline _Bool ns_path_is_file(const char *p) {\n");
+    emit(o, "    struct stat st; return stat(p,&st)==0&&S_ISREG(st.st_mode);\n}\n");
+    emit(o, "static inline _Bool ns_path_is_absolute(const char *p) {\n");
+    emit(o, "    return p && p[0]=='/';\n}\n");
+    emit(o, "static inline const char *ns_path_absolute(const char *p) {\n");
+    emit(o, "#if defined(_POSIX_VERSION)\n");
+    emit(o, "    if(realpath(p,_ns_path_abs)) return _ns_path_abs;\n");
+    emit(o, "#endif\n    return p;\n}\n\n");
+
+    /* ── std.env ──────────────────────────────────────────────────────────── */
+    emit(o, "/* std.env */\n");
+    emit(o, "static inline _Bool ns_env_exists(const char *name) {\n");
+    emit(o, "    return getenv(name) != (void*)0;\n}\n");
+    emit(o, "static inline const char *ns_env_get_or(const char *name, const char *def) {\n");
+    emit(o, "    const char *v=getenv(name); return v ? v : def;\n}\n\n");
+
+    /* ── std.process ──────────────────────────────────────────────────────── */
+    emit(o, "/* std.process */\n");
+    emit(o, "#include <signal.h>\n");
+    emit(o, "#if defined(_POSIX_VERSION)\n");
+    emit(o, "static inline int32_t ns_process_getpid(void)  { return (int32_t)getpid(); }\n");
+    emit(o, "static inline int32_t ns_process_getppid(void) { return (int32_t)getppid(); }\n");
+    emit(o, "#else\n");
+    emit(o, "static inline int32_t ns_process_getpid(void)  { return 0; }\n");
+    emit(o, "static inline int32_t ns_process_getppid(void) { return 0; }\n");
+    emit(o, "#endif\n\n");
+
+    /* ── std.fs extras ────────────────────────────────────────────────────── */
+    emit(o, "/* std.fs extras */\n");
+    emit(o, "static inline int64_t ns_fs_size(void *fp) {\n");
+    emit(o, "    long cur=ftell((FILE*)fp); fseek((FILE*)fp,0,2);\n");
+    emit(o, "    long sz=ftell((FILE*)fp); fseek((FILE*)fp,cur,0); return (int64_t)sz;\n}\n");
+    emit(o, "static inline int32_t ns_fs_mkdir(const char *p) {\n");
+    emit(o, "#ifdef _WIN32\n    return _mkdir(p);\n");
+    emit(o, "#else\n    return mkdir(p,0755);\n#endif\n}\n");
+    emit(o, "static inline int32_t ns_fs_rmdir(const char *p) {\n");
+    emit(o, "#ifdef _WIN32\n    return _rmdir(p);\n");
+    emit(o, "#else\n    return rmdir(p);\n#endif\n}\n\n");
+}
+
 /* ── std.io runtime ──────────────────────────────────────────────────────── */
 
 
@@ -3191,10 +3366,15 @@ static void emit_io_runtime(COut *o) {
     emit(o, "    _ns_io_buf[_l] = '\\0';\n");
     emit(o, "    return _ns_io_buf;\n");
     emit(o, "}\n");
+    emit(o, "static inline void      ns_io_print_char(uint8_t c)    { fputc((int)c, stdout); }\n");
+    emit(o, "static inline void      ns_io_eflush(void)             { fflush(stderr); }\n");
     emit(o, "static inline int32_t   ns_io_read_i32(void)  { int32_t  n = 0; scanf(\"%%d\",  &n); return n; }\n");
     emit(o, "static inline int64_t   ns_io_read_i64(void)  { long long n = 0; scanf(\"%%lld\", &n); return (int64_t)n; }\n");
     emit(o, "static inline uint32_t  ns_io_read_u32(void)  { uint32_t n = 0; scanf(\"%%u\",  &n); return n; }\n");
+    emit(o, "static inline uint64_t  ns_io_read_u64(void)  { unsigned long long n = 0; scanf(\"%%llu\", &n); return (uint64_t)n; }\n");
     emit(o, "static inline double    ns_io_read_f64(void)  { double   n = 0; scanf(\"%%lf\", &n); return n; }\n");
+    emit(o, "static inline int       ns_io_read_bool(void) { char b[8]={0}; scanf(\"%%7s\",b);\n");
+    emit(o, "    return (b[0]=='t'||b[0]=='T'||b[0]=='1'||b[0]=='y'||b[0]=='Y'); }\n");
     emit(o, "/* ──────────────────────────────────────────────────────────── */\n\n");
 }
 
@@ -3682,72 +3862,696 @@ static void emit_kernel_app(COut *o, Node *prog) {
     Node *app = NULL;
     for (int i = 0; i < prog->as.program.decls.count; i++) {
         if (prog->as.program.decls.items[i]->kind == NODE_KERNEL_APP) {
-            app = prog->as.program.decls.items[i];
-            break;
+            app = prog->as.program.decls.items[i]; break;
         }
     }
     if (!app) return;
 
-    emit(o, "\n/* ── NightScript Kernel Runtime (v0.5) ────────────────── */\n");
-    emit(o, "/* Multiboot2 header */\n");
+    emit(o, "\n/* ════════════════════════════════════════════════════════════\n");
+    emit(o, "   NightScript Kernel Runtime — v0.6\n");
+    emit(o, "   Generated by the NightScript compiler (ApexForge)\n");
+    emit(o, "════════════════════════════════════════════════════════════ */\n\n");
+
+    /* ── Multiboot2 boot header ─────────────────────────────────────────── */
+    emit(o, "/* ── Multiboot2 ─── */\n");
     emit(o, "#define NS_MB2_MAGIC    0xe85250d6u\n");
     emit(o, "#define NS_MB2_ARCH_X86 0u\n");
+    emit(o, "#define NS_MB2_LEN      24u\n");
     emit(o, "__attribute__((section(\".multiboot2\"), used))\n");
     emit(o, "static unsigned int ns_mb2_header[] = {\n");
-    emit(o, "    NS_MB2_MAGIC, NS_MB2_ARCH_X86,\n");
-    emit(o, "    24u,   /* header length */\n");
-    emit(o, "    (unsigned int)(-(NS_MB2_MAGIC + NS_MB2_ARCH_X86 + 24u)),\n");
-    emit(o, "    0u, 0u, 8u  /* end tag */\n");
+    emit(o, "    NS_MB2_MAGIC, NS_MB2_ARCH_X86, NS_MB2_LEN,\n");
+    emit(o, "    (unsigned int)(0u - (NS_MB2_MAGIC + NS_MB2_ARCH_X86 + NS_MB2_LEN)),\n");
+    emit(o, "    0u, 0u, 8u  /* end tag: type=0, flags=0, size=8 */\n");
     emit(o, "};\n\n");
 
-    emit(o, "/* VGA text-mode helpers */\n");
-    emit(o, "#define NS_VGA_BASE ((volatile unsigned short *)0xB8000)\n");
-    emit(o, "static int ns_vga_row = 0, ns_vga_col = 0;\n");
+    /* ── CPU ────────────────────────────────────────────────────────────── */
+    emit(o, "/* ── CPU ─── */\n");
+    emit(o, "static inline void ns_cpu_halt(void)  { __asm__ volatile(\"hlt\"); }\n");
+    emit(o, "static inline void ns_cpu_cli(void)   { __asm__ volatile(\"cli\"); }\n");
+    emit(o, "static inline void ns_cpu_sti(void)   { __asm__ volatile(\"sti\"); }\n");
+    emit(o, "static inline void ns_cpu_nop(void)   { __asm__ volatile(\"nop\"); }\n");
+    emit(o, "static inline void ns_cpu_pause(void) { __asm__ volatile(\"pause\"); }\n\n");
+
+    /* ── Port I/O ────────────────────────────────────────────────────────── */
+    emit(o, "/* ── Port I/O ─── */\n");
+    emit(o, "static inline unsigned char  ns_inb(unsigned short p)\n");
+    emit(o, "    { unsigned char r; __asm__ volatile(\"inb %%dx,%%al\":\"=a\"(r):\"d\"(p)); return r; }\n");
+    emit(o, "static inline unsigned short ns_inw(unsigned short p)\n");
+    emit(o, "    { unsigned short r; __asm__ volatile(\"inw %%dx,%%ax\":\"=a\"(r):\"d\"(p)); return r; }\n");
+    emit(o, "static inline unsigned int   ns_inl(unsigned short p)\n");
+    emit(o, "    { unsigned int r; __asm__ volatile(\"inl %%dx,%%eax\":\"=a\"(r):\"d\"(p)); return r; }\n");
+    emit(o, "static inline void ns_outb(unsigned short p, unsigned char v)\n");
+    emit(o, "    { __asm__ volatile(\"outb %%al,%%dx\"::\"a\"(v),\"d\"(p)); }\n");
+    emit(o, "static inline void ns_outw(unsigned short p, unsigned short v)\n");
+    emit(o, "    { __asm__ volatile(\"outw %%ax,%%dx\"::\"a\"(v),\"d\"(p)); }\n");
+    emit(o, "static inline void ns_outl(unsigned short p, unsigned int v)\n");
+    emit(o, "    { __asm__ volatile(\"outl %%eax,%%dx\"::\"a\"(v),\"d\"(p)); }\n");
+    emit(o, "static inline void ns_io_wait(void) { ns_outb(0x80, 0); }\n\n");
+
+    /* ── VGA text mode ──────────────────────────────────────────────────── */
+    emit(o, "/* ── VGA text mode (80×25) ─── */\n");
+    emit(o, "#define NS_VGA ((volatile unsigned short *)0xB8000)\n");
+    emit(o, "static int ns_vga_row=0, ns_vga_col=0;\n");
+    emit(o, "static unsigned char ns_vga_attr=0x0F; /* white on black */\n");
+    emit(o, "static void ns_vga_set_color(unsigned char attr) { ns_vga_attr=attr; }\n");
     emit(o, "static void ns_vga_clear(void) {\n");
-    emit(o, "    for (int i = 0; i < 80*25; i++)\n");
-    emit(o, "        NS_VGA_BASE[i] = (unsigned short)(0x0F00 | ' ');\n");
-    emit(o, "    ns_vga_row = ns_vga_col = 0;\n");
-    emit(o, "}\n");
+    emit(o, "    for(int i=0;i<80*25;i++) NS_VGA[i]=(unsigned short)(((unsigned short)ns_vga_attr<<8)|' ');\n");
+    emit(o, "    ns_vga_row=ns_vga_col=0;\n}\n");
+    emit(o, "static void ns_vga_scroll(void) {\n");
+    emit(o, "    for(int i=0;i<80*24;i++) NS_VGA[i]=NS_VGA[i+80];\n");
+    emit(o, "    for(int i=80*24;i<80*25;i++) NS_VGA[i]=(unsigned short)(((unsigned short)ns_vga_attr<<8)|' ');\n");
+    emit(o, "    ns_vga_row=24;\n}\n");
     emit(o, "static void ns_vga_putchar(char c) {\n");
-    emit(o, "    if (c == '\\n') { ns_vga_col = 0; ns_vga_row++; return; }\n");
-    emit(o, "    if (ns_vga_col >= 80) { ns_vga_col = 0; ns_vga_row++; }\n");
-    emit(o, "    if (ns_vga_row >= 25) ns_vga_row = 0;\n");
-    emit(o, "    NS_VGA_BASE[ns_vga_row * 80 + ns_vga_col] =\n");
-    emit(o, "        (unsigned short)(0x0F00 | (unsigned char)c);\n");
-    emit(o, "    ns_vga_col++;\n");
-    emit(o, "}\n");
-    emit(o, "static void ns_vga_print(const char *s) {\n");
-    emit(o, "    while (*s) ns_vga_putchar(*s++);\n");
-    emit(o, "}\n\n");
+    emit(o, "    if(c=='\\n'||ns_vga_col>=80){ns_vga_col=0;ns_vga_row++;}\n");
+    emit(o, "    if(c=='\\n') return;\n");
+    emit(o, "    if(ns_vga_row>=25) ns_vga_scroll();\n");
+    emit(o, "    NS_VGA[ns_vga_row*80+ns_vga_col]=(unsigned short)(((unsigned short)ns_vga_attr<<8)|(unsigned char)c);\n");
+    emit(o, "    ns_vga_col++;\n}\n");
+    emit(o, "static void ns_vga_print(const char *s){while(*s)ns_vga_putchar(*s++);}\n");
+    emit(o, "static void ns_vga_println(const char *s){ns_vga_print(s);ns_vga_putchar('\\n');}\n");
+    emit(o, "static void ns_vga_print_u32(unsigned int n) {\n");
+    emit(o, "    if(!n){ns_vga_putchar('0');return;}\n");
+    emit(o, "    char buf[12];int i=0;\n");
+    emit(o, "    while(n){buf[i++]='0'+n%%10;n/=10;}\n");
+    emit(o, "    while(i--) ns_vga_putchar(buf[i]);\n}\n");
+    emit(o, "static void ns_vga_print_hex(unsigned int n) {\n");
+    emit(o, "    const char *h=\"0123456789ABCDEF\";\n");
+    emit(o, "    ns_vga_print(\"0x\");\n");
+    emit(o, "    for(int s=28;s>=0;s-=4) ns_vga_putchar(h[(n>>s)&0xF]);\n}\n\n");
 
-    emit(o, "/* Serial port (COM1 0x3F8) helpers */\n");
-    emit(o, "#define NS_SERIAL_PORT 0x3F8\n");
-    emit(o, "static void ns_outb(unsigned short port, unsigned char val) {\n");
-    emit(o, "    __asm__ volatile(\"outb %%al, %%dx\" : : \"a\"(val), \"d\"(port));\n");
-    emit(o, "}\n");
+    /* ── Serial (COM1) ──────────────────────────────────────────────────── */
+    emit(o, "/* ── Serial COM1 (0x3F8) ─── */\n");
+    emit(o, "#define NS_COM1 0x3F8\n");
     emit(o, "static void ns_serial_init(void) {\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 1, 0x00);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 3, 0x80);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 0, 0x03);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 1, 0x00);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 3, 0x03);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 2, 0xC7);\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT + 4, 0x0B);\n");
-    emit(o, "}\n");
+    emit(o, "    ns_outb(NS_COM1+1,0x00); ns_outb(NS_COM1+3,0x80);\n");
+    emit(o, "    ns_outb(NS_COM1+0,0x03); ns_outb(NS_COM1+1,0x00);\n");
+    emit(o, "    ns_outb(NS_COM1+3,0x03); ns_outb(NS_COM1+2,0xC7);\n");
+    emit(o, "    ns_outb(NS_COM1+4,0x0B);\n}\n");
     emit(o, "static void ns_serial_putchar(char c) {\n");
-    emit(o, "    ns_outb(NS_SERIAL_PORT, (unsigned char)c);\n");
-    emit(o, "}\n");
-    emit(o, "static void ns_serial_print(const char *s) {\n");
-    emit(o, "    while (*s) ns_serial_putchar(*s++);\n");
-    emit(o, "}\n\n");
+    emit(o, "    while(!(ns_inb(NS_COM1+5)&0x20)); ns_outb(NS_COM1,(unsigned char)c);\n}\n");
+    emit(o, "static void ns_serial_print(const char *s){while(*s)ns_serial_putchar(*s++);}\n");
+    emit(o, "static void ns_serial_println(const char *s){ns_serial_print(s);ns_serial_putchar('\\n');}\n\n");
 
-    emit(o, "/* Kernel entry point — called by bootloader */\n");
+    /* ── GDT ────────────────────────────────────────────────────────────── */
+    emit(o, "/* ── GDT (Global Descriptor Table) ─── */\n");
+    emit(o, "typedef struct __attribute__((packed)) {\n");
+    emit(o, "    unsigned short lim_low, base_low;\n");
+    emit(o, "    unsigned char  base_mid, access, gran, base_high;\n");
+    emit(o, "} NS_GdtEntry;\n");
+    emit(o, "typedef struct __attribute__((packed)) {\n");
+    emit(o, "    unsigned short size; unsigned int base;\n");
+    emit(o, "} NS_GdtDescriptor;\n");
+    emit(o, "static NS_GdtEntry      ns_gdt[5];\n");
+    emit(o, "static NS_GdtDescriptor ns_gdt_ptr;\n");
+    emit(o, "static void ns_gdt_set(int i,unsigned int base,unsigned int lim,\n");
+    emit(o, "                       unsigned char access,unsigned char gran){\n");
+    emit(o, "    ns_gdt[i].base_low =(unsigned short)(base&0xFFFF);\n");
+    emit(o, "    ns_gdt[i].base_mid =(unsigned char)((base>>16)&0xFF);\n");
+    emit(o, "    ns_gdt[i].base_high=(unsigned char)((base>>24)&0xFF);\n");
+    emit(o, "    ns_gdt[i].lim_low  =(unsigned short)(lim&0xFFFF);\n");
+    emit(o, "    ns_gdt[i].gran     =(unsigned char)(((lim>>16)&0x0F)|(gran&0xF0));\n");
+    emit(o, "    ns_gdt[i].access   =access;\n}\n");
+    emit(o, "static void ns_gdt_install(void) {\n");
+    emit(o, "    ns_gdt_ptr.size=(unsigned short)(sizeof(ns_gdt)-1);\n");
+    emit(o, "    ns_gdt_ptr.base=(unsigned int)(unsigned long)&ns_gdt;\n");
+    emit(o, "    __asm__ volatile(\"lgdt (%0)\"::\"r\"(&ns_gdt_ptr):\"memory\");\n}\n");
+    emit(o, "static void ns_gdt_init(void) {\n");
+    emit(o, "    ns_gdt_set(0,0,0,0,0);             /* null */\n");
+    emit(o, "    ns_gdt_set(1,0,0xFFFFFFFF,0x9A,0xCF); /* code ring0 */\n");
+    emit(o, "    ns_gdt_set(2,0,0xFFFFFFFF,0x92,0xCF); /* data ring0 */\n");
+    emit(o, "    ns_gdt_set(3,0,0xFFFFFFFF,0xFA,0xCF); /* code ring3 */\n");
+    emit(o, "    ns_gdt_set(4,0,0xFFFFFFFF,0xF2,0xCF); /* data ring3 */\n");
+    emit(o, "    ns_gdt_install();\n}\n\n");
+
+    /* ── IDT + PIC ──────────────────────────────────────────────────────── */
+    emit(o, "/* ── IDT + PIC (8259A) ─── */\n");
+    emit(o, "typedef struct __attribute__((packed)) {\n");
+    emit(o, "    unsigned short base_low,sel;\n");
+    emit(o, "    unsigned char  zero,flags;\n");
+    emit(o, "    unsigned short base_high;\n");
+    emit(o, "} NS_IdtEntry;\n");
+    emit(o, "typedef struct __attribute__((packed)) {\n");
+    emit(o, "    unsigned short size; unsigned int base;\n");
+    emit(o, "} NS_IdtDescriptor;\n");
+    emit(o, "static NS_IdtEntry      ns_idt[256];\n");
+    emit(o, "static NS_IdtDescriptor ns_idt_ptr;\n");
+    emit(o, "typedef void (*NS_IsrFn)(void);\n");
+    emit(o, "static NS_IsrFn ns_irq_handlers[16];\n");
+    emit(o, "static void ns_idt_set(unsigned char n,unsigned int base,\n");
+    emit(o, "                       unsigned short sel,unsigned char flags){\n");
+    emit(o, "    ns_idt[n].base_low =(unsigned short)(base&0xFFFF);\n");
+    emit(o, "    ns_idt[n].base_high=(unsigned short)((base>>16)&0xFFFF);\n");
+    emit(o, "    ns_idt[n].sel=sel; ns_idt[n].zero=0; ns_idt[n].flags=flags;\n}\n");
+    emit(o, "static void ns_idt_install(void) {\n");
+    emit(o, "    ns_idt_ptr.size=(unsigned short)(sizeof(ns_idt)-1);\n");
+    emit(o, "    ns_idt_ptr.base=(unsigned int)(unsigned long)&ns_idt;\n");
+    emit(o, "    __asm__ volatile(\"lidt (%0)\"::\"r\"(&ns_idt_ptr):\"memory\");\n}\n");
+    emit(o, "static void ns_pic_remap(unsigned char o1,unsigned char o2){\n");
+    emit(o, "    unsigned char m1=ns_inb(0x21),m2=ns_inb(0xA1);\n");
+    emit(o, "    ns_outb(0x20,0x11);ns_io_wait(); ns_outb(0xA0,0x11);ns_io_wait();\n");
+    emit(o, "    ns_outb(0x21,o1); ns_io_wait(); ns_outb(0xA1,o2); ns_io_wait();\n");
+    emit(o, "    ns_outb(0x21,0x04);ns_io_wait(); ns_outb(0xA1,0x02);ns_io_wait();\n");
+    emit(o, "    ns_outb(0x21,0x01);ns_io_wait(); ns_outb(0xA1,0x01);ns_io_wait();\n");
+    emit(o, "    ns_outb(0x21,m1); ns_outb(0xA1,m2);\n}\n");
+    emit(o, "static void ns_pic_eoi(unsigned char irq){\n");
+    emit(o, "    if(irq>=8) ns_outb(0xA0,0x20); ns_outb(0x20,0x20);\n}\n");
+    emit(o, "static void ns_irq_register(unsigned char irq,NS_IsrFn fn){\n");
+    emit(o, "    ns_irq_handlers[irq]=fn;\n");
+    emit(o, "    ns_idt_set((unsigned char)(irq+0x20),(unsigned int)(unsigned long)fn,0x08,0x8E);\n}\n");
+    emit(o, "static void ns_interrupts_init(void){\n");
+    emit(o, "    ns_pic_remap(0x20,0x28);\n");
+    emit(o, "    ns_idt_install();\n}\n\n");
+
+    /* ── PIT timer ──────────────────────────────────────────────────────── */
+    emit(o, "/* ── PIT Timer (IRQ0) ─── */\n");
+    emit(o, "static volatile unsigned int ns_ticks=0;\n");
+    emit(o, "static void ns_timer_tick(void){ns_ticks++;ns_pic_eoi(0);}\n");
+    emit(o, "static void ns_timer_init(unsigned int hz){\n");
+    emit(o, "    unsigned int div=1193180/hz;\n");
+    emit(o, "    ns_outb(0x43,0x36);\n");
+    emit(o, "    ns_outb(0x40,(unsigned char)(div&0xFF));\n");
+    emit(o, "    ns_outb(0x40,(unsigned char)((div>>8)&0xFF));\n");
+    emit(o, "    ns_irq_register(0,ns_timer_tick);\n}\n");
+    emit(o, "static unsigned int ns_timer_ticks(void){return ns_ticks;}\n");
+    emit(o, "static void ns_timer_wait(unsigned int ms){\n");
+    emit(o, "    unsigned int end=ns_ticks+ms;\n");
+    emit(o, "    while(ns_ticks<end) ns_cpu_halt();\n}\n\n");
+
+    /* ── PS/2 Keyboard ──────────────────────────────────────────────────── */
+    emit(o, "/* ── PS/2 Keyboard (IRQ1) ─── */\n");
+    emit(o, "static volatile unsigned char ns_kb_last=0;\n");
+    emit(o, "static void (*ns_kb_handler)(unsigned char)=(void*)0;\n");
+    emit(o, "static const char ns_kb_ascii[128]={\n");
+    emit(o, "  0,27,'1','2','3','4','5','6','7','8','9','0','-','=','\\b','\\t',\n");
+    emit(o, "  'q','w','e','r','t','y','u','i','o','p','[',']','\\n',0,\n");
+    emit(o, "  'a','s','d','f','g','h','j','k','l',';','\\'',' ',0,'\\\\',\n");
+    emit(o, "  'z','x','c','v','b','n','m',',','.','/',0,'*',0,' ',0,\n");
+    emit(o, "  0,0,0,0,0,0,0,0,0,0,0,0,0,'7','8','9','-',\n");
+    emit(o, "  '4','5','6','+','1','2','3','0','.',0,0,0,0,0,0,0\n};\n");
+    emit(o, "static void ns_kb_irq(void){\n");
+    emit(o, "    ns_kb_last=ns_inb(0x60);\n");
+    emit(o, "    if(ns_kb_handler) ns_kb_handler(ns_kb_last);\n");
+    emit(o, "    ns_pic_eoi(1);\n}\n");
+    emit(o, "static void ns_keyboard_init(void)  {ns_irq_register(1,ns_kb_irq);}\n");
+    emit(o, "static void ns_keyboard_on_key(void(*fn)(unsigned char)){ns_kb_handler=fn;}\n");
+    emit(o, "static char ns_keyboard_to_ascii(unsigned char sc){\n");
+    emit(o, "    return (sc<128)?ns_kb_ascii[sc]:0;\n}\n\n");
+
+    /* ── Physical Memory Manager ─────────────────────────────────────────── */
+    emit(o, "/* ── Physical Memory Manager (bitmap) ─── */\n");
+    emit(o, "#define NS_PAGE_SIZE 4096u\n");
+    emit(o, "static unsigned char *ns_pmm_map=(unsigned char*)0;\n");
+    emit(o, "static unsigned int ns_pmm_pages=0, ns_pmm_used=0;\n");
+    emit(o, "static void ns_pmm_init(unsigned int mem_kb, unsigned int bitmap_base){\n");
+    emit(o, "    ns_pmm_map=(unsigned char*)(unsigned long)bitmap_base;\n");
+    emit(o, "    ns_pmm_pages=(mem_kb*1024)/NS_PAGE_SIZE;\n");
+    emit(o, "    for(unsigned int i=0;i<(ns_pmm_pages/8)+1;i++) ns_pmm_map[i]=0;\n");
+    emit(o, "    ns_pmm_used=0;\n}\n");
+    emit(o, "static void *ns_pmm_alloc(void){\n");
+    emit(o, "    for(unsigned int i=0;i<ns_pmm_pages;i++)\n");
+    emit(o, "        if(!(ns_pmm_map[i/8]&(1u<<(i%%8)))){\n");
+    emit(o, "            ns_pmm_map[i/8]|=(unsigned char)(1u<<(i%%8));\n");
+    emit(o, "            ns_pmm_used++;\n");
+    emit(o, "            return (void*)(unsigned long)(i*NS_PAGE_SIZE);\n        }\n");
+    emit(o, "    return (void*)0;\n}\n");
+    emit(o, "static void ns_pmm_free(void *p){\n");
+    emit(o, "    unsigned int i=(unsigned int)(unsigned long)p/NS_PAGE_SIZE;\n");
+    emit(o, "    if(ns_pmm_map[i/8]&(1u<<(i%%8))){\n");
+    emit(o, "        ns_pmm_map[i/8]&=(unsigned char)~(1u<<(i%%8)); ns_pmm_used--;\n    }\n}\n");
+    emit(o, "static unsigned int ns_pmm_free_count(void){return ns_pmm_pages-ns_pmm_used;}\n\n");
+
+    /* ── Linear Framebuffer ──────────────────────────────────────────────── */
+    emit(o, "/* ── Linear Framebuffer ─── */\n");
+    emit(o, "static unsigned int *ns_fb=(unsigned int*)0;\n");
+    emit(o, "static unsigned int ns_fb_w=0,ns_fb_h=0,ns_fb_pitch=0;\n");
+    emit(o, "static void ns_fb_init(unsigned int *addr,unsigned int w,\n");
+    emit(o, "                       unsigned int h,unsigned int pitch_bytes){\n");
+    emit(o, "    ns_fb=addr; ns_fb_w=w; ns_fb_h=h; ns_fb_pitch=pitch_bytes/4;\n}\n");
+    emit(o, "static void ns_fb_pixel(unsigned int x,unsigned int y,unsigned int c){\n");
+    emit(o, "    if(x<ns_fb_w&&y<ns_fb_h) ns_fb[y*ns_fb_pitch+x]=c;\n}\n");
+    emit(o, "static void ns_fb_fill(unsigned int x,unsigned int y,\n");
+    emit(o, "                       unsigned int w,unsigned int h,unsigned int c){\n");
+    emit(o, "    for(unsigned int dy=0;dy<h;dy++)\n");
+    emit(o, "        for(unsigned int dx=0;dx<w;dx++)\n");
+    emit(o, "            ns_fb_pixel(x+dx,y+dy,c);\n}\n");
+    emit(o, "static void ns_fb_clear(unsigned int c){ns_fb_fill(0,0,ns_fb_w,ns_fb_h,c);}\n");
+    /* 8×8 bitmap font for framebuffer */
+    emit(o, "static const unsigned char ns_fb_font[96][8]={\n");
+    emit(o, /* space */ "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* !     */ "  {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},\n");
+    emit(o, /* "     */ "  {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* #     */ "  {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00},\n");
+    emit(o, /* $     */ "  {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00},\n");
+    emit(o, /* %%    */ "  {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00},\n");
+    emit(o, /* &     */ "  {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00},\n");
+    emit(o, /* '     */ "  {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* (     */ "  {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00},\n");
+    emit(o, /* )     */ "  {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00},\n");
+    emit(o, /* *     */ "  {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00},\n");
+    emit(o, /* +     */ "  {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00},\n");
+    emit(o, /* ,     */ "  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06},\n");
+    emit(o, /* -     */ "  {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* .     */ "  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00},\n");
+    emit(o, /* /     */ "  {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00},\n");
+    emit(o, /* 0     */ "  {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00},\n");
+    emit(o, /* 1     */ "  {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00},\n");
+    emit(o, /* 2     */ "  {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00},\n");
+    emit(o, /* 3     */ "  {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00},\n");
+    emit(o, /* 4     */ "  {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00},\n");
+    emit(o, /* 5     */ "  {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00},\n");
+    emit(o, /* 6     */ "  {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00},\n");
+    emit(o, /* 7     */ "  {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00},\n");
+    emit(o, /* 8     */ "  {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00},\n");
+    emit(o, /* 9     */ "  {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00},\n");
+    emit(o, /* :     */ "  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00},\n");
+    emit(o, /* ;     */ "  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06},\n");
+    emit(o, /* <     */ "  {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00},\n");
+    emit(o, /* =     */ "  {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00},\n");
+    emit(o, /* >     */ "  {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00},\n");
+    emit(o, /* ?     */ "  {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00},\n");
+    emit(o, /* @     */ "  {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00},\n");
+    emit(o, /* A     */ "  {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00},\n");
+    emit(o, /* B     */ "  {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00},\n");
+    emit(o, /* C     */ "  {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00},\n");
+    emit(o, /* D     */ "  {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00},\n");
+    emit(o, /* E     */ "  {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00},\n");
+    emit(o, /* F     */ "  {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00},\n");
+    emit(o, /* G     */ "  {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00},\n");
+    emit(o, /* H     */ "  {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00},\n");
+    emit(o, /* I     */ "  {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    emit(o, /* J     */ "  {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00},\n");
+    emit(o, /* K     */ "  {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00},\n");
+    emit(o, /* L     */ "  {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00},\n");
+    emit(o, /* M     */ "  {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00},\n");
+    emit(o, /* N     */ "  {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00},\n");
+    emit(o, /* O     */ "  {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00},\n");
+    emit(o, /* P     */ "  {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00},\n");
+    emit(o, /* Q     */ "  {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00},\n");
+    emit(o, /* R     */ "  {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00},\n");
+    emit(o, /* S     */ "  {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00},\n");
+    emit(o, /* T     */ "  {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    emit(o, /* U     */ "  {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00},\n");
+    emit(o, /* V     */ "  {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00},\n");
+    emit(o, /* W     */ "  {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00},\n");
+    emit(o, /* X     */ "  {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00},\n");
+    emit(o, /* Y     */ "  {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00},\n");
+    emit(o, /* Z     */ "  {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00},\n");
+    emit(o, /* [     */ "  {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00},\n");
+    emit(o, /* \\    */ "  {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00},\n");
+    emit(o, /* ]     */ "  {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00},\n");
+    emit(o, /* ^     */ "  {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* _     */ "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF},\n");
+    emit(o, /* `     */ "  {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* a     */ "  {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00},\n");
+    emit(o, /* b     */ "  {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00},\n");
+    emit(o, /* c     */ "  {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00},\n");
+    emit(o, /* d     */ "  {0x38,0x30,0x30,0x3E,0x33,0x33,0x6E,0x00},\n");
+    emit(o, /* e     */ "  {0x00,0x00,0x1E,0x33,0x3F,0x03,0x1E,0x00},\n");
+    emit(o, /* f     */ "  {0x1C,0x36,0x06,0x0F,0x06,0x06,0x0F,0x00},\n");
+    emit(o, /* g     */ "  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F},\n");
+    emit(o, /* h     */ "  {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00},\n");
+    emit(o, /* i     */ "  {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    emit(o, /* j     */ "  {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E},\n");
+    emit(o, /* k     */ "  {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00},\n");
+    emit(o, /* l     */ "  {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    emit(o, /* m     */ "  {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00},\n");
+    emit(o, /* n     */ "  {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00},\n");
+    emit(o, /* o     */ "  {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00},\n");
+    emit(o, /* p     */ "  {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F},\n");
+    emit(o, /* q     */ "  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78},\n");
+    emit(o, /* r     */ "  {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00},\n");
+    emit(o, /* s     */ "  {0x00,0x00,0x1E,0x03,0x1E,0x30,0x1F,0x00},\n");
+    emit(o, /* t     */ "  {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00},\n");
+    emit(o, /* u     */ "  {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00},\n");
+    emit(o, /* v     */ "  {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00},\n");
+    emit(o, /* w     */ "  {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00},\n");
+    emit(o, /* x     */ "  {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00},\n");
+    emit(o, /* y     */ "  {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F},\n");
+    emit(o, /* z     */ "  {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00},\n");
+    emit(o, /* {     */ "  {0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00},\n");
+    emit(o, /* |     */ "  {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00},\n");
+    emit(o, /* }     */ "  {0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00},\n");
+    emit(o, /* ~     */ "  {0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, /* DEL   */ "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}\n};\n");
+    emit(o, "static void ns_fb_char(unsigned int x,unsigned int y,char ch,\n");
+    emit(o, "                       unsigned int fg,unsigned int bg){\n");
+    emit(o, "    if(ch<32||ch>127) ch=32;\n");
+    emit(o, "    const unsigned char *g=ns_fb_font[(unsigned char)(ch-32)];\n");
+    emit(o, "    for(int r=0;r<8;r++) for(int c=0;c<8;c++)\n");
+    emit(o, "        ns_fb_pixel(x+c,y+r,(g[r]&(1<<(7-c)))?fg:bg);\n}\n");
+    emit(o, "static void ns_fb_str(unsigned int x,unsigned int y,const char *s,\n");
+    emit(o, "                      unsigned int fg,unsigned int bg){\n");
+    emit(o, "    unsigned int cx=x;\n");
+    emit(o, "    while(*s){ if(*s=='\\n'){cx=x;y+=10;} else{ns_fb_char(cx,y,*s,fg,bg);cx+=9;} s++; }\n}\n\n");
+
+    /* ══════════════════════════════════════════════════════════════════════
+       v0.6 — NightOS Runtime: Mouse · Window Manager · Terminal · Shell
+       ══════════════════════════════════════════════════════════════════════ */
+
+    /* ── PS/2 Mouse driver (IRQ 12) ─────────────────────────────────────── */
+    emit(o, "/* ── v0.6: PS/2 Mouse driver ─── */\n");
+    emit(o, "static volatile int32_t  _ns_mouse_x   = 400;\n");
+    emit(o, "static volatile int32_t  _ns_mouse_y   = 300;\n");
+    emit(o, "static volatile uint8_t  _ns_mouse_btn = 0;\n");
+    emit(o, "static volatile uint8_t  _ns_mouse_cycle = 0;\n");
+    emit(o, "static volatile uint8_t  _ns_mouse_pkt[3] = {0,0,0};\n\n");
+
+    emit(o, "static void _ns_mouse_wait_in(void)  { uint32_t t=200000; while(--t&&(ns_inb(0x64)&0x02)); }\n");
+    emit(o, "static void _ns_mouse_wait_out(void) { uint32_t t=200000; while(--t&&!(ns_inb(0x64)&0x01)); }\n");
+    emit(o, "static void _ns_mouse_cmd(uint8_t v) {\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x64,0xD4);\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x60,v);\n}\n");
+    emit(o, "static uint8_t _ns_mouse_read(void) { _ns_mouse_wait_out(); return ns_inb(0x60); }\n\n");
+
+    emit(o, "static void ns_mouse_irq(void) {\n");
+    emit(o, "    uint8_t status = ns_inb(0x64);\n");
+    emit(o, "    if(!(status&0x01)){ ns_pic_eoi(12); return; }\n");
+    emit(o, "    uint8_t data = ns_inb(0x60);\n");
+    emit(o, "    switch(_ns_mouse_cycle){\n");
+    emit(o, "      case 0: if(!(data&0x08)) break; _ns_mouse_pkt[0]=data; _ns_mouse_cycle=1; break;\n");
+    emit(o, "      case 1: _ns_mouse_pkt[1]=data; _ns_mouse_cycle=2; break;\n");
+    emit(o, "      case 2: _ns_mouse_pkt[2]=data; _ns_mouse_cycle=0;\n");
+    emit(o, "        { int32_t dx=(int32_t)(int8_t)_ns_mouse_pkt[1];\n");
+    emit(o, "          int32_t dy=-(int32_t)(int8_t)_ns_mouse_pkt[2];\n");
+    emit(o, "          _ns_mouse_x+=dx; _ns_mouse_y+=dy;\n");
+    emit(o, "          if(_ns_mouse_x<0) _ns_mouse_x=0;\n");
+    emit(o, "          if(_ns_mouse_y<0) _ns_mouse_y=0;\n");
+    emit(o, "          if(_ns_mouse_x>=(int32_t)_ns_fb_width)  _ns_mouse_x=(int32_t)_ns_fb_width-1;\n");
+    emit(o, "          if(_ns_mouse_y>=(int32_t)_ns_fb_height) _ns_mouse_y=(int32_t)_ns_fb_height-1;\n");
+    emit(o, "          _ns_mouse_btn=_ns_mouse_pkt[0]&0x07; }\n");
+    emit(o, "        break;\n    }\n    ns_pic_eoi(12);\n}\n\n");
+
+    emit(o, "static void ns_mouse_init(void) {\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x64,0xA8); /* enable aux port */\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x64,0x20);\n");
+    emit(o, "    _ns_mouse_wait_out();\n");
+    emit(o, "    uint8_t st=ns_inb(0x60)|0x02;\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x64,0x60);\n");
+    emit(o, "    _ns_mouse_wait_in(); ns_outb(0x60,st);\n");
+    emit(o, "    _ns_mouse_cmd(0xF6); _ns_mouse_read(); /* default settings */\n");
+    emit(o, "    _ns_mouse_cmd(0xF4); _ns_mouse_read(); /* enable streaming  */\n");
+    emit(o, "    ns_irq_register(12,(void*)ns_mouse_irq);\n");
+    emit(o, "    ns_unmask_irq(12);\n}\n\n");
+
+    emit(o, "static inline int32_t ns_mouse_x(void)       { return _ns_mouse_x; }\n");
+    emit(o, "static inline int32_t ns_mouse_y(void)       { return _ns_mouse_y; }\n");
+    emit(o, "static inline uint8_t ns_mouse_buttons(void) { return _ns_mouse_btn; }\n");
+    emit(o, "static inline uint8_t ns_mouse_left(void)    { return _ns_mouse_btn&0x01; }\n");
+    emit(o, "static inline uint8_t ns_mouse_right(void)   { return (_ns_mouse_btn>>1)&0x01; }\n");
+    emit(o, "static inline uint8_t ns_mouse_middle(void)  { return (_ns_mouse_btn>>2)&0x01; }\n\n");
+
+    /* IRQ unmask helper needed by mouse */
+    emit(o, "static inline void ns_unmask_irq(uint8_t irq) {\n");
+    emit(o, "    uint16_t port=(uint16_t)(irq>=8?0xA1:0x21);\n");
+    emit(o, "    uint8_t bit=(uint8_t)(irq>=8?irq-8:irq);\n");
+    emit(o, "    ns_outb(port,ns_inb(port)&(uint8_t)(~(1u<<bit)));\n}\n\n");
+
+    /* ── Mouse cursor (12×20 arrow sprite) ──────────────────────────────── */
+    emit(o, "/* ── Mouse cursor sprite ─── */\n");
+    emit(o, "static const uint16_t _ns_cursor[20]={\n");
+    emit(o, "    0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,\n");
+    emit(o, "    0xFE00,0xFF00,0xF800,0xEC00,0xC600,0x0300,\n");
+    emit(o, "    0x0380,0x01C0,0x00E0,0x0070,0x0038,0x001C,\n");
+    emit(o, "    0x000E,0x0007};\n");
+    emit(o, "static void ns_draw_cursor(int32_t x,int32_t y) {\n");
+    emit(o, "    for(int r=0;r<20;r++) {\n");
+    emit(o, "        uint16_t row=_ns_cursor[r];\n");
+    emit(o, "        for(int c=0;c<12;c++) {\n");
+    emit(o, "            if(!(row&(0x8000u>>(unsigned)c))) continue;\n");
+    emit(o, "            uint32_t px=(uint32_t)(x+c), py=(uint32_t)(y+r);\n");
+    emit(o, "            if(px<_ns_fb_width&&py<_ns_fb_height) ns_fb_pixel(px,py,0x00FFFFFF);\n");
+    emit(o, "        }\n    }\n}\n\n");
+
+    /* ── Window Manager ──────────────────────────────────────────────────── */
+    emit(o, "/* ── v0.6: Window Manager ─── */\n");
+    emit(o, "#define NS_WM_MAX   8\n");
+    emit(o, "#define NS_WM_TB_H  20\n");   /* title-bar height */
+    emit(o, "#define NS_WM_BD    2\n");    /* border width */
+    emit(o, "#define NS_WM_CB_W  16\n");   /* close-button width */
+    emit(o, "typedef struct {\n");
+    emit(o, "    int32_t x,y,w,h;\n");
+    emit(o, "    const char *title;\n");
+    emit(o, "    uint8_t visible, focused, closing;\n");
+    emit(o, "    int32_t drag_dx, drag_dy;\n");
+    emit(o, "} NS_Win;\n");
+    emit(o, "static NS_Win   _ns_wins[NS_WM_MAX];\n");
+    emit(o, "static int32_t  _ns_win_count   = 0;\n");
+    emit(o, "static int32_t  _ns_win_focused = -1;\n");
+    emit(o, "static int32_t  _ns_win_dragging= -1;\n");
+    emit(o, "static uint8_t  _ns_wm_prev_btn = 0;\n\n");
+
+    /* color constants */
+    emit(o, "#define NS_C_DESKTOP 0x00203050u\n");
+    emit(o, "#define NS_C_TASKBAR 0x00102040u\n");
+    emit(o, "#define NS_C_TB_FOC  0x001060C0u\n");
+    emit(o, "#define NS_C_TB_UNF  0x00405060u\n");
+    emit(o, "#define NS_C_BORDER  0x004090D0u\n");
+    emit(o, "#define NS_C_BODY    0x00181820u\n");
+    emit(o, "#define NS_C_CLOSE   0x00CC2222u\n");
+    emit(o, "#define NS_C_TXT_W   0x00FFFFFFu\n");
+    emit(o, "#define NS_C_TXT_G   0x0080C0FFu\n\n");
+
+    emit(o, "static void ns_wm_init(void) {\n");
+    emit(o, "    for(int i=0;i<NS_WM_MAX;i++) _ns_wins[i].visible=0;\n");
+    emit(o, "    _ns_win_count=0; _ns_win_focused=-1; _ns_win_dragging=-1;\n}\n\n");
+
+    emit(o, "static int32_t ns_wm_create(const char *title,int32_t x,int32_t y,int32_t w,int32_t h) {\n");
+    emit(o, "    if(_ns_win_count>=NS_WM_MAX) return -1;\n");
+    emit(o, "    int32_t idx=_ns_win_count++;\n");
+    emit(o, "    NS_Win *win=&_ns_wins[idx];\n");
+    emit(o, "    win->x=x; win->y=y; win->w=w; win->h=h; win->title=title;\n");
+    emit(o, "    win->visible=1; win->focused=0; win->closing=0;\n");
+    emit(o, "    win->drag_dx=0; win->drag_dy=0;\n");
+    emit(o, "    if(_ns_win_focused<0) _ns_win_focused=idx;\n");
+    emit(o, "    return idx;\n}\n\n");
+
+    emit(o, "static void _ns_wm_draw_win(int32_t idx) {\n");
+    emit(o, "    NS_Win *w=&_ns_wins[idx];\n");
+    emit(o, "    if(!w->visible) return;\n");
+    emit(o, "    uint32_t tc=(idx==_ns_win_focused)?NS_C_TB_FOC:NS_C_TB_UNF;\n");
+    emit(o, "    /* border */\n");
+    emit(o, "    ns_fb_fill((uint32_t)(w->x-NS_WM_BD),(uint32_t)(w->y-NS_WM_TB_H-NS_WM_BD),\n");
+    emit(o, "               (uint32_t)(w->w+NS_WM_BD*2),(uint32_t)(w->h+NS_WM_TB_H+NS_WM_BD*2),NS_C_BORDER);\n");
+    emit(o, "    /* title bar */\n");
+    emit(o, "    ns_fb_fill((uint32_t)w->x,(uint32_t)(w->y-NS_WM_TB_H),(uint32_t)w->w,(uint32_t)NS_WM_TB_H,tc);\n");
+    emit(o, "    /* close button */\n");
+    emit(o, "    ns_fb_fill((uint32_t)(w->x+w->w-NS_WM_CB_W-3),(uint32_t)(w->y-NS_WM_TB_H+2),\n");
+    emit(o, "               (uint32_t)NS_WM_CB_W,(uint32_t)(NS_WM_TB_H-4),NS_C_CLOSE);\n");
+    emit(o, "    ns_fb_str((uint32_t)(w->x+w->w-NS_WM_CB_W)  ,(uint32_t)(w->y-NS_WM_TB_H+4),\"X\",NS_C_TXT_W,NS_C_CLOSE);\n");
+    emit(o, "    /* title text */\n");
+    emit(o, "    ns_fb_str((uint32_t)(w->x+5),(uint32_t)(w->y-NS_WM_TB_H+4),w->title,NS_C_TXT_W,tc);\n");
+    emit(o, "    /* body */\n");
+    emit(o, "    ns_fb_fill((uint32_t)w->x,(uint32_t)w->y,(uint32_t)w->w,(uint32_t)w->h,NS_C_BODY);\n}\n\n");
+
+    emit(o, "static void ns_wm_render(void) {\n");
+    emit(o, "    ns_fb_clear(NS_C_DESKTOP);\n");
+    emit(o, "    /* taskbar */\n");
+    emit(o, "    ns_fb_fill(0,_ns_fb_height-24,_ns_fb_width,24,NS_C_TASKBAR);\n");
+    emit(o, "    ns_fb_str(6,_ns_fb_height-17,\"NightOS v0.6  |  ApexForge NightScript\",NS_C_TXT_G,NS_C_TASKBAR);\n");
+    emit(o, "    /* draw unfocused windows first, then focused on top */\n");
+    emit(o, "    for(int i=0;i<_ns_win_count;i++) if(i!=_ns_win_focused) _ns_wm_draw_win(i);\n");
+    emit(o, "    if(_ns_win_focused>=0) _ns_wm_draw_win(_ns_win_focused);\n}\n\n");
+
+    emit(o, "static void ns_wm_handle_mouse(int32_t mx,int32_t my,uint8_t btn) {\n");
+    emit(o, "    uint8_t pressed  = btn & (uint8_t)(~_ns_wm_prev_btn);\n");
+    emit(o, "    uint8_t released = _ns_wm_prev_btn & (uint8_t)(~btn);\n");
+    emit(o, "    if(pressed&0x01) {\n");
+    emit(o, "        for(int i=_ns_win_count-1;i>=0;i--) {\n");
+    emit(o, "            NS_Win *w=&_ns_wins[i]; if(!w->visible) continue;\n");
+    emit(o, "            int32_t tbx=w->x, tby=w->y-NS_WM_TB_H;\n");
+    emit(o, "            if(mx>=tbx&&mx<tbx+w->w&&my>=tby&&my<tby+NS_WM_TB_H) {\n");
+    emit(o, "                _ns_win_focused=i;\n");
+    emit(o, "                /* close button? */\n");
+    emit(o, "                if(mx>=w->x+w->w-NS_WM_CB_W-3&&mx<w->x+w->w-3) {\n");
+    emit(o, "                    w->visible=0; w->closing=1;\n");
+    emit(o, "                } else {\n");
+    emit(o, "                    _ns_win_dragging=i;\n");
+    emit(o, "                    w->drag_dx=mx-w->x; w->drag_dy=my-w->y;\n");
+    emit(o, "                }\n");
+    emit(o, "                break;\n");
+    emit(o, "            }\n");
+    emit(o, "            if(mx>=w->x&&mx<w->x+w->w&&my>=w->y&&my<w->y+w->h) {\n");
+    emit(o, "                _ns_win_focused=i; break;\n");
+    emit(o, "            }\n");
+    emit(o, "        }\n    }\n");
+    emit(o, "    if((btn&0x01)&&_ns_win_dragging>=0) {\n");
+    emit(o, "        NS_Win *w=&_ns_wins[_ns_win_dragging];\n");
+    emit(o, "        w->x=mx-w->drag_dx; w->y=my-w->drag_dy;\n");
+    emit(o, "        if(w->x<0) w->x=0;\n");
+    emit(o, "        if(w->y<NS_WM_TB_H) w->y=NS_WM_TB_H;\n");
+    emit(o, "        if(w->x+w->w>(int32_t)_ns_fb_width)  w->x=(int32_t)_ns_fb_width-w->w;\n");
+    emit(o, "        if(w->y+w->h>(int32_t)_ns_fb_height-24) w->y=(int32_t)_ns_fb_height-24-w->h;\n");
+    emit(o, "    }\n");
+    emit(o, "    if(released&0x01) _ns_win_dragging=-1;\n");
+    emit(o, "    _ns_wm_prev_btn=btn;\n}\n\n");
+
+    emit(o, "static inline NS_Win *ns_wm_get(int32_t idx) {\n");
+    emit(o, "    return (idx>=0&&idx<_ns_win_count)?&_ns_wins[idx]:(void*)0;\n}\n");
+    emit(o, "static inline uint8_t ns_win_visible(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w&&w->visible; }\n");
+    emit(o, "static inline uint8_t ns_win_closing(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w&&w->closing; }\n");
+    emit(o, "static inline int32_t ns_win_x(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w?w->x:0; }\n");
+    emit(o, "static inline int32_t ns_win_y(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w?w->y:0; }\n");
+    emit(o, "static inline int32_t ns_win_w(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w?w->w:0; }\n");
+    emit(o, "static inline int32_t ns_win_h(int32_t idx) { NS_Win *w=ns_wm_get(idx); return w?w->h:0; }\n\n");
+
+    /* ── Terminal emulator ───────────────────────────────────────────────── */
+    emit(o, "/* ── v0.6: Terminal emulator ─── */\n");
+    emit(o, "#define NS_TERM_COLS 64\n");
+    emit(o, "#define NS_TERM_ROWS 22\n");
+    emit(o, "#define NS_TERM_MAX   4\n");
+    emit(o, "typedef struct {\n");
+    emit(o, "    char     buf[NS_TERM_COLS*NS_TERM_ROWS];\n");
+    emit(o, "    int32_t  cx,cy;\n");
+    emit(o, "    int32_t  win_idx;\n");
+    emit(o, "    uint32_t fg,bg;\n");
+    emit(o, "    uint8_t  active;\n");
+    emit(o, "} NS_Term;\n");
+    emit(o, "static NS_Term _ns_terms[NS_TERM_MAX];\n\n");
+
+    emit(o, "static void ns_term_clear_buf(NS_Term *t) {\n");
+    emit(o, "    for(int i=0;i<NS_TERM_COLS*NS_TERM_ROWS;i++) t->buf[i]=' ';\n");
+    emit(o, "    t->cx=0; t->cy=0;\n}\n\n");
+
+    emit(o, "static void ns_term_init(int32_t tidx,int32_t widx,uint32_t fg,uint32_t bg) {\n");
+    emit(o, "    NS_Term *t=&_ns_terms[tidx];\n");
+    emit(o, "    ns_term_clear_buf(t);\n");
+    emit(o, "    t->win_idx=widx; t->fg=fg; t->bg=bg; t->active=1;\n}\n\n");
+
+    emit(o, "static void _ns_term_scroll(NS_Term *t) {\n");
+    emit(o, "    for(int r=0;r<NS_TERM_ROWS-1;r++)\n");
+    emit(o, "        for(int c=0;c<NS_TERM_COLS;c++)\n");
+    emit(o, "            t->buf[r*NS_TERM_COLS+c]=t->buf[(r+1)*NS_TERM_COLS+c];\n");
+    emit(o, "    for(int c=0;c<NS_TERM_COLS;c++) t->buf[(NS_TERM_ROWS-1)*NS_TERM_COLS+c]=' ';\n");
+    emit(o, "    t->cy=NS_TERM_ROWS-1;\n}\n\n");
+
+    emit(o, "static void ns_term_putch(int32_t tidx,uint8_t c) {\n");
+    emit(o, "    NS_Term *t=&_ns_terms[tidx];\n");
+    emit(o, "    if(!t->active) return;\n");
+    emit(o, "    if(c=='\\n'||c=='\\r') { t->cx=0; t->cy++;\n");
+    emit(o, "        if(t->cy>=NS_TERM_ROWS) _ns_term_scroll(t); return; }\n");
+    emit(o, "    if(c=='\\b') {\n");
+    emit(o, "        if(t->cx>0) { t->cx--; t->buf[t->cy*NS_TERM_COLS+t->cx]=' '; } return; }\n");
+    emit(o, "    if(c<32||c>126) c='?';\n");
+    emit(o, "    t->buf[t->cy*NS_TERM_COLS+t->cx]=c;\n");
+    emit(o, "    t->cx++;\n");
+    emit(o, "    if(t->cx>=NS_TERM_COLS) { t->cx=0; t->cy++; }\n");
+    emit(o, "    if(t->cy>=NS_TERM_ROWS) _ns_term_scroll(t);\n}\n\n");
+
+    emit(o, "static void ns_term_puts(int32_t tidx,const char *s) {\n");
+    emit(o, "    while(*s) ns_term_putch(tidx,(uint8_t)*s++);\n}\n\n");
+
+    emit(o, "static void ns_term_render(int32_t tidx) {\n");
+    emit(o, "    NS_Term *t=&_ns_terms[tidx];\n");
+    emit(o, "    if(!t->active||t->win_idx<0) return;\n");
+    emit(o, "    NS_Win *w=ns_wm_get(t->win_idx); if(!w||!w->visible) return;\n");
+    emit(o, "    static char row[NS_TERM_COLS+1];\n");
+    emit(o, "    for(int r=0;r<NS_TERM_ROWS;r++) {\n");
+    emit(o, "        for(int c=0;c<NS_TERM_COLS;c++) row[c]=t->buf[r*NS_TERM_COLS+c];\n");
+    emit(o, "        row[NS_TERM_COLS]=0;\n");
+    emit(o, "        ns_fb_str((uint32_t)(w->x+4),(uint32_t)(w->y+2+r*10),row,t->fg,t->bg);\n");
+    emit(o, "    }\n");
+    emit(o, "    /* cursor bar */\n");
+    emit(o, "    ns_fb_fill((uint32_t)(w->x+4+t->cx*9),(uint32_t)(w->y+2+t->cy*10+8),8u,2u,t->fg);\n}\n\n");
+
+    /* ── Basic Shell ─────────────────────────────────────────────────────── */
+    emit(o, "/* ── v0.6: Basic shell ─── */\n");
+    emit(o, "#define NS_SHELL_BUF 256\n");
+    emit(o, "static char    _ns_shell_line[NS_SHELL_BUF];\n");
+    emit(o, "static int32_t _ns_shell_len  = 0;\n");
+    emit(o, "static int32_t _ns_shell_term = -1;\n\n");
+
+    /* helper: streq */
+    emit(o, "static int _ns_streq(const char *a,const char *b) {\n");
+    emit(o, "    while(*a&&*b&&*a==*b){a++;b++;} return *a==*b;\n}\n");
+    emit(o, "static const char *_ns_skip_sp(const char *s) { while(*s==' ')s++; return s; }\n\n");
+
+    emit(o, "static void ns_shell_exec(const char *cmd) {\n");
+    emit(o, "    int32_t t=_ns_shell_term; if(t<0) return;\n");
+    emit(o, "    cmd=_ns_skip_sp(cmd);\n");
+    emit(o, "    if(*cmd==0) { /* empty line */ }\n");
+    emit(o, "    else if(_ns_streq(cmd,\"help\")) {\n");
+    emit(o, "        ns_term_puts(t,\"Commands: help  clear  version  halt  echo <text>  mem\\r\\n\");\n");
+    emit(o, "    } else if(_ns_streq(cmd,\"clear\")) {\n");
+    emit(o, "        int32_t wi=_ns_terms[t].win_idx;\n");
+    emit(o, "        uint32_t fg=_ns_terms[t].fg, bg=_ns_terms[t].bg;\n");
+    emit(o, "        ns_term_init(t,wi,fg,bg); ns_shell_init(t); return;\n");
+    emit(o, "    } else if(_ns_streq(cmd,\"version\")) {\n");
+    emit(o, "        ns_term_puts(t,\"NightOS v0.6 — ApexForge NightScript Kernel\\r\\n\");\n");
+    emit(o, "    } else if(_ns_streq(cmd,\"halt\")) {\n");
+    emit(o, "        ns_term_puts(t,\"Halting system...\\r\\n\");\n");
+    emit(o, "        ns_cpu_cli(); for(;;) ns_cpu_halt();\n");
+    emit(o, "    } else if(_ns_streq(cmd,\"mem\")) {\n");
+    emit(o, "        ns_term_puts(t,\"PMM free pages: \"); \n");
+    emit(o, "        { uint32_t fp=ns_pmm_free_count(), n=fp;\n");
+    emit(o, "          char tmp[12]; int i=11; tmp[i]=0;\n");
+    emit(o, "          if(n==0){tmp[--i]='0';}\n");
+    emit(o, "          else{while(n>0){tmp[--i]=(char)('0'+n%%10);n/=10;}}\n");
+    emit(o, "          ns_term_puts(t,tmp+i); ns_term_puts(t,\"\\r\\n\"); (void)fp; }\n");
+    emit(o, "    } else if(cmd[0]=='e'&&cmd[1]=='c'&&cmd[2]=='h'&&cmd[3]=='o'&&(cmd[4]==' '||cmd[4]==0)) {\n");
+    emit(o, "        ns_term_puts(t,_ns_skip_sp(cmd+4)); ns_term_puts(t,\"\\r\\n\");\n");
+    emit(o, "    } else {\n");
+    emit(o, "        ns_term_puts(t,\"Unknown: \"); ns_term_puts(t,cmd); ns_term_puts(t,\"\\r\\n\");\n");
+    emit(o, "    }\n");
+    emit(o, "    ns_term_puts(t,\"> \");\n}\n\n");
+
+    emit(o, "static void ns_shell_init(int32_t term_idx) {\n");
+    emit(o, "    _ns_shell_term=term_idx; _ns_shell_len=0;\n");
+    emit(o, "    ns_term_puts(term_idx,\"NightOS v0.6 — NightScript Shell\\r\\n\");\n");
+    emit(o, "    ns_term_puts(term_idx,\"Type 'help' for commands.\\r\\n> \");\n}\n\n");
+
+    emit(o, "static void ns_shell_on_key(uint8_t scancode) {\n");
+    emit(o, "    if(_ns_shell_term<0) return;\n");
+    emit(o, "    uint8_t c=ns_keyboard_to_ascii(scancode);\n");
+    emit(o, "    if(!c) return;\n");
+    emit(o, "    if(c=='\\n'||c=='\\r') {\n");
+    emit(o, "        ns_term_putch(_ns_shell_term,'\\n');\n");
+    emit(o, "        _ns_shell_line[_ns_shell_len]=0;\n");
+    emit(o, "        ns_shell_exec(_ns_shell_line);\n");
+    emit(o, "        _ns_shell_len=0;\n");
+    emit(o, "    } else if(c=='\\b') {\n");
+    emit(o, "        if(_ns_shell_len>0) { _ns_shell_len--; ns_term_putch(_ns_shell_term,'\\b'); }\n");
+    emit(o, "    } else if(c>=32&&c<127&&_ns_shell_len<NS_SHELL_BUF-1) {\n");
+    emit(o, "        _ns_shell_line[_ns_shell_len++]=c;\n");
+    emit(o, "        ns_term_putch(_ns_shell_term,c);\n");
+    emit(o, "    }\n}\n\n");
+
+    /* ── OS-level init and render ────────────────────────────────────────── */
+    emit(o, "/* ── v0.6: OS event loop helpers ─── */\n");
+    emit(o, "static uint8_t _ns_os_last_scan = 0;\n\n");
+
+    emit(o, "static void ns_os_poll(void) {\n");
+    emit(o, "    /* keyboard: read scancode from PS/2 data port if ready */\n");
+    emit(o, "    if(ns_inb(0x64)&0x01) {\n");
+    emit(o, "        uint8_t sc=ns_inb(0x60);\n");
+    emit(o, "        if(sc!=_ns_os_last_scan) {\n");
+    emit(o, "            _ns_os_last_scan=sc;\n");
+    emit(o, "            if(!(sc&0x80)) ns_shell_on_key(sc);\n"); /* only make codes */
+    emit(o, "        }\n    }\n}\n\n");
+
+    emit(o, "static void ns_os_render(void) {\n");
+    emit(o, "    ns_wm_render();\n");
+    emit(o, "    /* render all active terminals */\n");
+    emit(o, "    for(int i=0;i<NS_TERM_MAX;i++) if(_ns_terms[i].active) ns_term_render(i);\n");
+    emit(o, "    /* draw mouse cursor on top */\n");
+    emit(o, "    ns_draw_cursor(_ns_mouse_x,_ns_mouse_y);\n}\n\n");
+
+    emit(o, "static void ns_os_init(void) {\n");
+    emit(o, "    ns_wm_init();\n");
+    emit(o, "    for(int i=0;i<NS_TERM_MAX;i++) _ns_terms[i].active=0;\n");
+    emit(o, "    _ns_shell_term=-1; _ns_shell_len=0;\n}\n\n");
+
+    /* ── Kernel entry point ──────────────────────────────────────────────── */
+    emit(o, "/* ── Kernel entry ─── */\n");
     emit(o, "__attribute__((noreturn))\n");
     emit(o, "void kernel_main(void) {\n");
+    emit(o, "    ns_cpu_cli();\n");
+    emit(o, "    ns_gdt_init();\n");
+    emit(o, "    ns_interrupts_init();\n");
     emit(o, "    ns_vga_clear();\n");
     emit(o, "    ns_serial_init();\n");
+    emit(o, "    ns_cpu_sti();\n");
     emit(o, "    main();\n");
-    emit(o, "    for (;;) __asm__ volatile(\"hlt\");\n");
+    emit(o, "    for (;;) ns_cpu_halt();\n");
     emit(o, "    __builtin_unreachable();\n");
     emit(o, "}\n");
 }
@@ -3769,8 +4573,10 @@ int codegen_generate(Node *program, COut *out) {
     if (has_ui_app(program))
         emit(out, "#include <SDL2/SDL.h>\n\n");
     emit_type_definitions(out, program);
-    if (!is_kernel)
+    if (!is_kernel) {
+        emit_stdlib_runtime(out);
         emit_io_runtime(out);
+    }
     emit_prototypes(out, program);
     emit_definitions(out, program);
     if (has_ui_app(program))

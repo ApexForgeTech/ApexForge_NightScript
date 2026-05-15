@@ -1,33 +1,116 @@
 package kernel.serial;
 
+// Serial UART driver (16550-compatible, COM1 by default).
+// The kernel runtime (emitted by codegen) provides the ns_serial_* helpers
+// which already handle THRE polling before each character write.
+
+extern fn ns_serial_init() -> void;
+extern fn ns_serial_print(s: cstr) -> void;
+extern fn ns_serial_println(s: cstr) -> void;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Initialize COM1 at 38400 baud, 8N1, no interrupts.
+pub fn init() -> void             { ns_serial_init(); }
+
+// Print a null-terminated string to COM1.
+pub fn print(s: cstr) -> void     { ns_serial_print(s); }
+
+// Print a null-terminated string followed by "\r\n" to COM1.
+pub fn println(s: cstr) -> void   { ns_serial_println(s); }
+
+// Write a single byte directly to COM1 (busy-waits for THRE).
+pub fn putc(c: u8) -> void {
+    while (inb(0x03F8 + 5) & 0x20) == 0 { }  // wait for THRE
+    outb(0x03F8, c);
+}
+
+// Write a hex nibble character (0-F) to COM1.
+pub fn put_hex_nibble(n: u8) -> void {
+    let ch: u8 = n & 0x0F;
+    if ch < 10 { putc(ch + 48); }     // '0'..'9'
+    else       { putc(ch - 10 + 65); } // 'A'..'F'
+}
+
+// Write a u8 as two hex digits to COM1.
+pub fn put_hex8(n: u8) -> void {
+    put_hex_nibble(n >> 4);
+    put_hex_nibble(n);
+}
+
+// Write a u32 as eight hex digits to COM1.
+pub fn put_hex32(n: u32) -> void {
+    put_hex8((n >> 24) as u8);
+    put_hex8((n >> 16) as u8);
+    put_hex8((n >> 8) as u8);
+    put_hex8(n as u8);
+}
+
+// Internal: print digits of n recursively (skips leading zeros naturally).
+fn _put_u32_rec(n: u32) -> void {
+    if n >= 10 { _put_u32_rec(n / 10); }
+    putc((n % 10) as u8 + 48);
+}
+
+// Write a u32 as decimal digits to COM1.
+pub fn put_u32(n: u32) -> void {
+    if n == 0 { putc(48); return; }
+    _put_u32_rec(n);
+}
+
+// Write a signed i32 to COM1.
+pub fn put_i32(n: i32) -> void {
+    if n < 0 { putc(45); put_u32((-n) as u32); }
+    else      { put_u32(n as u32); }
+}
+
+// Write a CRLF pair to COM1.
+pub fn crlf() -> void { putc(13); putc(10); }
+
+// ── COM port base addresses ───────────────────────────────────────────────────
+
 const COM1: u16 = 0x3F8;
 const COM2: u16 = 0x2F8;
-const LSR_EMPTY: u8 = 0x20;
+const COM3: u16 = 0x3E8;
+const COM4: u16 = 0x2E8;
 
-pub fn com1_port() -> u16 {
-    return COM1;
-}
+// ── UART register offsets (add to base address) ───────────────────────────────
 
-pub fn com2_port() -> u16 {
-    return COM2;
-}
+const UART_DATA:    u16 = 0;   // receive/transmit data
+const UART_IER:     u16 = 1;   // interrupt enable register
+const UART_FCR_IIR: u16 = 2;   // FIFO control (w) / interrupt ID (r)
+const UART_LCR:     u16 = 3;   // line control register
+const UART_MCR:     u16 = 4;   // modem control register
+const UART_LSR:     u16 = 5;   // line status register
+const UART_MSR:     u16 = 6;   // modem status register
 
-pub fn lsr_tx_empty() -> u8 {
-    return LSR_EMPTY;
-}
+// Divisor latch registers (accessible when LCR bit 7 is set)
+const UART_DLL:     u16 = 0;   // divisor latch low byte
+const UART_DLH:     u16 = 1;   // divisor latch high byte
 
-pub fn data_port(base: u16) -> u16 {
-    return base;
-}
+// ── LSR bit masks ─────────────────────────────────────────────────────────────
 
-pub fn ier_port(base: u16) -> u16 {
-    return base + 1;
-}
+const LSR_DATA_READY: u8 = 0x01;  // received data ready
+const LSR_OVERRUN:    u8 = 0x02;  // overrun error
+const LSR_PARITY_ERR: u8 = 0x04;  // parity error
+const LSR_FRAME_ERR:  u8 = 0x08;  // framing error
+const LSR_BREAK:      u8 = 0x10;  // break interrupt
+const LSR_THRE:       u8 = 0x20;  // transmitter holding register empty
+const LSR_TEMT:       u8 = 0x40;  // transmitter empty (shift reg + THR)
+const LSR_FIFO_ERR:   u8 = 0x80;  // error in received FIFO
 
-pub fn lcr_port(base: u16) -> u16 {
-    return base + 3;
-}
+// ── LCR bit masks ─────────────────────────────────────────────────────────────
 
-pub fn lsr_port(base: u16) -> u16 {
-    return base + 5;
-}
+const LCR_8N1:    u8 = 0x03;  // 8 data bits, no parity, 1 stop bit
+const LCR_DLAB:   u8 = 0x80;  // divisor latch access bit
+
+// ── Common baud rate divisors (input clock = 115200 Hz) ──────────────────────
+
+const BAUD_115200: u16 = 1;
+const BAUD_57600:  u16 = 2;
+const BAUD_38400:  u16 = 3;
+const BAUD_19200:  u16 = 6;
+const BAUD_9600:   u16 = 12;
+const BAUD_4800:   u16 = 24;
+const BAUD_2400:   u16 = 48;
+const BAUD_1200:   u16 = 96;

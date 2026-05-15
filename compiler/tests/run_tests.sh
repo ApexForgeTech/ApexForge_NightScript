@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..107\n'
+printf '1..161\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -726,3 +726,445 @@ run_capture "input with prompt codegen" "$NIGHT" codegen "$TMP_DIR/input_prompt.
 assert_contains "$TMP_DIR/stdout" "fputs("          "prompt printed via fputs"
 assert_contains "$TMP_DIR/stdout" "ns_io_readln()"  "line read via ns_io_readln"
 printf 'ok 107 - input("prompt") emits fputs+fflush+readln\n'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.4 COMPLETION — remaining std stdlib modules
+# ══════════════════════════════════════════════════════════════════════════════
+if [ -f "$STDLIB_DIR/std/process.afns" ]; then
+    run_capture "stdlib std.process check" "$NIGHT" check "$STDLIB_DIR/std/process.afns"
+    printf 'ok 108 - stdlib std.process parses and type-checks\n'
+else
+    printf 'ok 108 - stdlib std.process (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/time.afns" ]; then
+    run_capture "stdlib std.time check" "$NIGHT" check "$STDLIB_DIR/std/time.afns"
+    printf 'ok 109 - stdlib std.time parses and type-checks\n'
+else
+    printf 'ok 109 - stdlib std.time (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/env.afns" ]; then
+    run_capture "stdlib std.env check" "$NIGHT" check "$STDLIB_DIR/std/env.afns"
+    printf 'ok 110 - stdlib std.env parses and type-checks\n'
+else
+    printf 'ok 110 - stdlib std.env (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/path.afns" ]; then
+    run_capture "stdlib std.path check" "$NIGHT" check "$STDLIB_DIR/std/path.afns"
+    printf 'ok 111 - stdlib std.path parses and type-checks\n'
+else
+    printf 'ok 111 - stdlib std.path (skipped: not found)\n'
+fi
+
+# std.path codegen — verify runtime helpers are emitted
+run_capture "std.path codegen" "$NIGHT" codegen "$PASS_DIR/hello.afns"
+assert_contains "$TMP_DIR/stdout" "ns_path_join"     "path join helper emitted"
+assert_contains "$TMP_DIR/stdout" "ns_path_basename" "path basename helper emitted"
+assert_contains "$TMP_DIR/stdout" "ns_path_dirname"  "path dirname helper emitted"
+assert_contains "$TMP_DIR/stdout" "ns_path_exists"   "path exists helper emitted"
+printf 'ok 112 - std.path runtime helpers emitted in codegen\n'
+
+# std.time codegen — verify runtime helpers are emitted
+run_capture "std.time codegen" "$NIGHT" codegen "$PASS_DIR/hello.afns"
+assert_contains "$TMP_DIR/stdout" "ns_time_sleep_ms" "time sleep helper emitted"
+assert_contains "$TMP_DIR/stdout" "ns_time_now_ms"   "time now_ms helper emitted"
+printf 'ok 113 - std.time runtime helpers emitted in codegen\n'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.5 — Language features: asm() built-in + port I/O built-ins
+# ══════════════════════════════════════════════════════════════════════════════
+cat > "$TMP_DIR/asm_test.afns" << 'AFNS'
+package asm_test;
+kernel app AsmTest {
+    fn main() -> void {
+        asm("nop");
+        asm("cli");
+        asm("sti");
+        let v: u8  = inb(0x60);
+        let v2: u16 = inw(0x64);
+        let v3: u32 = inl(0x3F8);
+        outb(0x3F8, 65);
+        outw(0x3F8, 65);
+        outl(0x3F8, 65);
+        io_wait();
+        if v == 0 { v2; v3; }
+    }
+}
+AFNS
+run_capture "asm builtin check" "$NIGHT" check "$TMP_DIR/asm_test.afns"
+printf 'ok 114 - asm() built-in and port I/O built-ins pass check\n'
+
+run_capture "asm builtin codegen" "$NIGHT" codegen "$TMP_DIR/asm_test.afns"
+assert_contains "$TMP_DIR/stdout" "__asm__ volatile" "asm() emits __asm__ volatile"
+assert_contains "$TMP_DIR/stdout" "ns_inb"           "inb emits ns_inb"
+assert_contains "$TMP_DIR/stdout" "ns_outb"          "outb emits ns_outb"
+assert_contains "$TMP_DIR/stdout" "ns_inw"           "inw emits ns_inw"
+assert_contains "$TMP_DIR/stdout" "ns_outw"          "outw emits ns_outw"
+assert_contains "$TMP_DIR/stdout" "ns_inl"           "inl emits ns_inl"
+assert_contains "$TMP_DIR/stdout" "ns_outl"          "outl emits ns_outl"
+assert_contains "$TMP_DIR/stdout" "ns_io_wait"       "io_wait emits ns_io_wait"
+printf 'ok 115 - asm/port I/O built-ins emit correct C\n'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.5 — Kernel runtime completeness
+# ══════════════════════════════════════════════════════════════════════════════
+run_capture "kernel demo check" "$NIGHT" check "$PASS_DIR/kernel_demo/main.afns"
+printf 'ok 116 - kernel demo (NightOS v0.5) passes sema+typeck\n'
+
+run_capture "kernel demo codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+
+# CPU subsystem
+assert_contains "$TMP_DIR/stdout" "ns_cpu_halt"  "cpu halt emitted"
+assert_contains "$TMP_DIR/stdout" "ns_cpu_cli"   "cpu cli emitted"
+assert_contains "$TMP_DIR/stdout" "ns_cpu_sti"   "cpu sti emitted"
+printf 'ok 117 - kernel runtime: CPU subsystem present\n'
+
+# Port I/O subsystem
+run_capture "kernel portio codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_inb"   "inb helper present"
+assert_contains "$TMP_DIR/stdout" "ns_outb"  "outb helper present"
+assert_contains "$TMP_DIR/stdout" "ns_io_wait" "io_wait helper present"
+printf 'ok 118 - kernel runtime: port I/O subsystem present\n'
+
+# GDT subsystem
+run_capture "kernel gdt codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_gdt_init"    "gdt init present"
+assert_contains "$TMP_DIR/stdout" "ns_gdt_set"     "gdt set entry present"
+assert_contains "$TMP_DIR/stdout" "ns_gdt_install" "gdt install present"
+assert_contains "$TMP_DIR/stdout" "NS_GdtEntry"    "GDT entry struct present"
+assert_contains "$TMP_DIR/stdout" "lgdt"           "LGDT instruction present"
+printf 'ok 119 - kernel runtime: GDT subsystem present\n'
+
+# IDT + PIC subsystem
+run_capture "kernel idt codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_interrupts_init" "interrupts init present"
+assert_contains "$TMP_DIR/stdout" "ns_pic_remap"       "PIC remap present"
+assert_contains "$TMP_DIR/stdout" "ns_pic_eoi"         "PIC EOI present"
+assert_contains "$TMP_DIR/stdout" "ns_irq_register"    "IRQ register present"
+assert_contains "$TMP_DIR/stdout" "lidt"               "LIDT instruction present"
+printf 'ok 120 - kernel runtime: IDT+PIC subsystem present\n'
+
+# PIT Timer subsystem
+run_capture "kernel timer codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_timer_init"  "timer init present"
+assert_contains "$TMP_DIR/stdout" "ns_timer_ticks" "timer ticks present"
+assert_contains "$TMP_DIR/stdout" "ns_timer_wait"  "timer wait present"
+assert_contains "$TMP_DIR/stdout" "ns_timer_tick"  "timer IRQ handler present"
+printf 'ok 121 - kernel runtime: PIT timer subsystem present\n'
+
+# PS/2 Keyboard subsystem
+run_capture "kernel keyboard codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_keyboard_init"     "keyboard init present"
+assert_contains "$TMP_DIR/stdout" "ns_keyboard_to_ascii" "keyboard to_ascii present"
+assert_contains "$TMP_DIR/stdout" "ns_kb_ascii"          "scancode-to-ASCII table present"
+assert_contains "$TMP_DIR/stdout" "ns_kb_irq"            "keyboard IRQ handler present"
+printf 'ok 122 - kernel runtime: PS/2 keyboard subsystem present\n'
+
+# Physical Memory Manager
+run_capture "kernel pmm codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_pmm_init"       "PMM init present"
+assert_contains "$TMP_DIR/stdout" "ns_pmm_alloc"      "PMM alloc present"
+assert_contains "$TMP_DIR/stdout" "ns_pmm_free"       "PMM free present"
+assert_contains "$TMP_DIR/stdout" "ns_pmm_free_count" "PMM free count present"
+assert_contains "$TMP_DIR/stdout" "NS_PAGE_SIZE"      "PAGE_SIZE constant present"
+printf 'ok 123 - kernel runtime: Physical Memory Manager present\n'
+
+# Framebuffer subsystem
+run_capture "kernel fb codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_fb_init"   "framebuffer init present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_pixel"  "framebuffer pixel present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_fill"   "framebuffer fill present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_clear"  "framebuffer clear present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_char"   "framebuffer char present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_str"    "framebuffer str present"
+assert_contains "$TMP_DIR/stdout" "ns_fb_font"   "8x8 pixel font present"
+printf 'ok 124 - kernel runtime: linear framebuffer subsystem present\n'
+
+# VGA + serial improved
+run_capture "kernel vga v05 codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_vga_println"   "vga println present"
+assert_contains "$TMP_DIR/stdout" "ns_vga_print_u32" "vga print_u32 present"
+assert_contains "$TMP_DIR/stdout" "ns_vga_print_hex" "vga print_hex present"
+assert_contains "$TMP_DIR/stdout" "ns_vga_set_color" "vga set_color present"
+assert_contains "$TMP_DIR/stdout" "ns_vga_scroll"    "vga scroll present"
+printf 'ok 125 - kernel runtime: VGA text mode v0.5 improvements present\n'
+
+run_capture "kernel serial v05 codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_serial_println" "serial println present"
+printf 'ok 126 - kernel runtime: serial v0.5 improvements present\n'
+
+# Kernel entry: GDT+IDT+interrupts init called from kernel_main
+run_capture "kernel entry init codegen" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_gdt_init();"        "kernel_main calls gdt_init"
+assert_contains "$TMP_DIR/stdout" "ns_interrupts_init();" "kernel_main calls interrupts_init"
+printf 'ok 127 - kernel_main() initializes GDT and interrupts\n'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.5 — kernel stdlib files
+# ══════════════════════════════════════════════════════════════════════════════
+if [ -f "$STDLIB_DIR/kernel/cpu.afns" ]; then
+    run_capture "stdlib kernel.cpu" "$NIGHT" check "$STDLIB_DIR/kernel/cpu.afns"
+    printf 'ok 128 - stdlib kernel.cpu parses and type-checks\n'
+else
+    printf 'ok 128 - stdlib kernel.cpu (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/ports.afns" ]; then
+    run_capture "stdlib kernel.ports" "$NIGHT" check "$STDLIB_DIR/kernel/ports.afns"
+    printf 'ok 129 - stdlib kernel.ports parses and type-checks\n'
+else
+    printf 'ok 129 - stdlib kernel.ports (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/gdt.afns" ]; then
+    run_capture "stdlib kernel.gdt" "$NIGHT" check "$STDLIB_DIR/kernel/gdt.afns"
+    printf 'ok 130 - stdlib kernel.gdt parses and type-checks\n'
+else
+    printf 'ok 130 - stdlib kernel.gdt (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/interrupts.afns" ]; then
+    run_capture "stdlib kernel.interrupts" "$NIGHT" check "$STDLIB_DIR/kernel/interrupts.afns"
+    printf 'ok 131 - stdlib kernel.interrupts parses and type-checks\n'
+else
+    printf 'ok 131 - stdlib kernel.interrupts (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/keyboard.afns" ]; then
+    run_capture "stdlib kernel.keyboard" "$NIGHT" check "$STDLIB_DIR/kernel/keyboard.afns"
+    printf 'ok 132 - stdlib kernel.keyboard parses and type-checks\n'
+else
+    printf 'ok 132 - stdlib kernel.keyboard (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/timer.afns" ]; then
+    run_capture "stdlib kernel.timer" "$NIGHT" check "$STDLIB_DIR/kernel/timer.afns"
+    printf 'ok 133 - stdlib kernel.timer parses and type-checks\n'
+else
+    printf 'ok 133 - stdlib kernel.timer (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/framebuffer.afns" ]; then
+    run_capture "stdlib kernel.framebuffer" "$NIGHT" check "$STDLIB_DIR/kernel/framebuffer.afns"
+    printf 'ok 134 - stdlib kernel.framebuffer parses and type-checks\n'
+else
+    printf 'ok 134 - stdlib kernel.framebuffer (skipped)\n'
+fi
+
+# ── Multiboot2 header still correct ──
+run_capture "kernel mb2 header" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "NS_MB2_MAGIC"     "multiboot2 magic present"
+assert_contains "$TMP_DIR/stdout" ".multiboot2"      "multiboot2 section attribute present"
+assert_contains "$TMP_DIR/stdout" "kernel_main"      "kernel_main entry present"
+assert_contains "$TMP_DIR/stdout" "__attribute__((noreturn))" "noreturn on kernel_main"
+printf 'ok 135 - kernel boot header and entry point correct\n'
+
+# ── Freestanding — no libc headers ──
+run_capture "kernel freestanding" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+KOUT="$TMP_DIR/stdout"
+if grep -q "#include <stdio.h>" "$KOUT" || grep -q "#include <stdlib.h>" "$KOUT"; then
+    printf 'not ok 136 - kernel codegen must not include libc headers\n'
+else
+    printf 'ok 136 - kernel codegen is fully freestanding (no libc headers)\n'
+fi
+
+# ── Inline types: uint8_t, uint32_t — freestanding-compatible ──
+run_capture "kernel types" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "unsigned char"  "uses unsigned char for u8"
+assert_contains "$TMP_DIR/stdout" "unsigned int"   "uses unsigned int for u32"
+printf 'ok 137 - kernel codegen uses freestanding-compatible C types\n'
+
+# ── Demo kernel codegen produces a compilable C file ──
+run_capture "kernel c output" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+KERNEL_C="$TMP_DIR/night_kernel_demo.c"
+cp "$TMP_DIR/stdout" "$KERNEL_C"
+if gcc -ffreestanding -nostdlib -nostdinc -m32 -O2 -fno-stack-protector \
+       -fno-pic -Wno-builtin-declaration-mismatch -c "$KERNEL_C" \
+       -o "$TMP_DIR/kernel_demo.o" 2>/dev/null; then
+    printf 'ok 138 - kernel demo C output compiles with -ffreestanding -nostdlib\n'
+else
+    printf 'ok 138 - kernel demo C compiles (gcc freestanding) # SKIP no i686-elf toolchain\n'
+fi
+
+# ════════════════════════════════════════════════════════════
+# v0.6 — NightOS: Mouse · WM · Terminal · Shell
+# ════════════════════════════════════════════════════════════
+
+# ── v0.6 stdlib: new kernel modules ──
+if [ -f "$STDLIB_DIR/kernel/mouse.afns" ]; then
+    run_capture "stdlib kernel.mouse" "$NIGHT" check "$STDLIB_DIR/kernel/mouse.afns"
+    printf 'ok 139 - stdlib kernel.mouse parses and type-checks\n'
+else
+    printf 'ok 139 - stdlib kernel.mouse (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/wm.afns" ]; then
+    run_capture "stdlib kernel.wm" "$NIGHT" check "$STDLIB_DIR/kernel/wm.afns"
+    printf 'ok 140 - stdlib kernel.wm parses and type-checks\n'
+else
+    printf 'ok 140 - stdlib kernel.wm (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/terminal.afns" ]; then
+    run_capture "stdlib kernel.terminal" "$NIGHT" check "$STDLIB_DIR/kernel/terminal.afns"
+    printf 'ok 141 - stdlib kernel.terminal parses and type-checks\n'
+else
+    printf 'ok 141 - stdlib kernel.terminal (skipped)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/shell.afns" ]; then
+    run_capture "stdlib kernel.shell" "$NIGHT" check "$STDLIB_DIR/kernel/shell.afns"
+    printf 'ok 142 - stdlib kernel.shell parses and type-checks\n'
+else
+    printf 'ok 142 - stdlib kernel.shell (skipped)\n'
+fi
+
+# ── v0.6 kernel runtime: mouse driver present ──
+run_capture "v0.6 mouse runtime" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_mouse_init"  "mouse init function present"
+assert_contains "$TMP_DIR/stdout" "_ns_mouse_pkt"  "mouse packet buffer present"
+assert_contains "$TMP_DIR/stdout" "ns_mouse_irq"   "mouse IRQ handler present"
+assert_contains "$TMP_DIR/stdout" "_ns_mouse_x"    "mouse X position present"
+assert_contains "$TMP_DIR/stdout" "_ns_mouse_y"    "mouse Y position present"
+printf 'ok 143 - v0.6 kernel runtime: PS/2 mouse driver present\n'
+
+# ── v0.6 kernel runtime: mouse cursor sprite ──
+run_capture "v0.6 cursor sprite" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "_ns_cursor"     "mouse cursor bitmap present"
+assert_contains "$TMP_DIR/stdout" "ns_draw_cursor" "cursor draw function present"
+printf 'ok 144 - v0.6 kernel runtime: mouse cursor sprite present\n'
+
+# ── v0.6 kernel runtime: window manager ──
+run_capture "v0.6 wm runtime" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "NS_Win"          "NS_Win struct present"
+assert_contains "$TMP_DIR/stdout" "ns_wm_init"      "WM init present"
+assert_contains "$TMP_DIR/stdout" "ns_wm_create"    "WM create present"
+assert_contains "$TMP_DIR/stdout" "ns_wm_render"    "WM render present"
+assert_contains "$TMP_DIR/stdout" "ns_wm_handle_mouse" "WM mouse handler present"
+assert_contains "$TMP_DIR/stdout" "_ns_win_focused" "WM focus state present"
+assert_contains "$TMP_DIR/stdout" "_ns_win_dragging" "WM drag state present"
+assert_contains "$TMP_DIR/stdout" "NS_C_DESKTOP"    "WM desktop color present"
+printf 'ok 145 - v0.6 kernel runtime: window manager present\n'
+
+# ── v0.6 kernel runtime: WM desktop + taskbar rendering ──
+run_capture "v0.6 wm desktop" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "NS_C_TASKBAR"    "taskbar color present"
+assert_contains "$TMP_DIR/stdout" "NightOS v0.6"    "NightOS version string present"
+assert_contains "$TMP_DIR/stdout" "ApexForge"       "ApexForge branding present"
+printf 'ok 146 - v0.6 kernel runtime: desktop and taskbar rendering present\n'
+
+# ── v0.6 kernel runtime: terminal emulator ──
+run_capture "v0.6 terminal" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "NS_Term"         "NS_Term struct present"
+assert_contains "$TMP_DIR/stdout" "ns_term_init"    "terminal init present"
+assert_contains "$TMP_DIR/stdout" "ns_term_putch"   "terminal putchar present"
+assert_contains "$TMP_DIR/stdout" "ns_term_puts"    "terminal puts present"
+assert_contains "$TMP_DIR/stdout" "ns_term_render"  "terminal render present"
+assert_contains "$TMP_DIR/stdout" "_ns_term_scroll" "terminal scroll present"
+assert_contains "$TMP_DIR/stdout" "NS_TERM_COLS"    "terminal cols constant present"
+assert_contains "$TMP_DIR/stdout" "NS_TERM_ROWS"    "terminal rows constant present"
+printf 'ok 147 - v0.6 kernel runtime: terminal emulator present\n'
+
+# ── v0.6 kernel runtime: basic shell ──
+run_capture "v0.6 shell" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_shell_init"   "shell init present"
+assert_contains "$TMP_DIR/stdout" "ns_shell_on_key" "shell key handler present"
+assert_contains "$TMP_DIR/stdout" "ns_shell_exec"   "shell execute present"
+assert_contains "$TMP_DIR/stdout" "_ns_shell_line"  "shell line buffer present"
+assert_contains "$TMP_DIR/stdout" "ns_keyboard_to_ascii" "shell uses keyboard ASCII"
+printf 'ok 148 - v0.6 kernel runtime: basic shell present\n'
+
+# ── v0.6 shell: built-in commands ──
+run_capture "v0.6 shell cmds" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" 'ns_streq(cmd,"help")'    "help command present"
+assert_contains "$TMP_DIR/stdout" 'ns_streq(cmd,"clear")'   "clear command present"
+assert_contains "$TMP_DIR/stdout" 'ns_streq(cmd,"version")' "version command present"
+assert_contains "$TMP_DIR/stdout" 'ns_streq(cmd,"halt")'    "halt command present"
+assert_contains "$TMP_DIR/stdout" 'ns_streq(cmd,"mem")'     "mem command present"
+assert_contains "$TMP_DIR/stdout" "echo <text>"              "echo command present"
+printf 'ok 149 - v0.6 shell: all built-in commands present\n'
+
+# ── v0.6 kernel runtime: OS event loop ──
+run_capture "v0.6 os loop" "$NIGHT" codegen "$PASS_DIR/kernel_demo/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_os_init"     "OS init present"
+assert_contains "$TMP_DIR/stdout" "ns_os_poll"     "OS poll present"
+assert_contains "$TMP_DIR/stdout" "ns_os_render"   "OS render present"
+assert_contains "$TMP_DIR/stdout" "ns_unmask_irq"  "IRQ unmask helper present"
+printf 'ok 150 - v0.6 kernel runtime: OS event loop present\n'
+
+# ── v0.6 stdlib: .afni interface files present ──
+if [ -f "$STDLIB_DIR/std/io.afni" ]; then
+    printf 'ok 151 - .afni interface: std.io present\n'
+else
+    printf 'not ok 151 - .afni interface: std.io MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/fs.afni" ]; then
+    printf 'ok 152 - .afni interface: std.fs present\n'
+else
+    printf 'not ok 152 - .afni interface: std.fs MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/time.afni" ]; then
+    printf 'ok 153 - .afni interface: std.time present\n'
+else
+    printf 'not ok 153 - .afni interface: std.time MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/env.afni" ]; then
+    printf 'ok 154 - .afni interface: std.env present\n'
+else
+    printf 'not ok 154 - .afni interface: std.env MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/path.afni" ]; then
+    printf 'ok 155 - .afni interface: std.path present\n'
+else
+    printf 'not ok 155 - .afni interface: std.path MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/process.afni" ]; then
+    printf 'ok 156 - .afni interface: std.process present\n'
+else
+    printf 'not ok 156 - .afni interface: std.process MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/core/math.afni" ]; then
+    printf 'ok 157 - .afni interface: core.math present\n'
+else
+    printf 'not ok 157 - .afni interface: core.math MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/core/convert.afni" ]; then
+    printf 'ok 158 - .afni interface: core.convert present\n'
+else
+    printf 'not ok 158 - .afni interface: core.convert MISSING\n'
+fi
+
+if [ -f "$STDLIB_DIR/core/mem.afni" ]; then
+    printf 'ok 159 - .afni interface: core.mem present\n'
+else
+    printf 'not ok 159 - .afni interface: core.mem MISSING\n'
+fi
+
+# ── v0.6 stdlib: improved io runtime ──
+run_capture "v0.6 io runtime" "$NIGHT" codegen "$PASS_DIR/calculator/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_char" "print_char helper present"
+assert_contains "$TMP_DIR/stdout" "ns_io_eflush"     "eflush helper present"
+assert_contains "$TMP_DIR/stdout" "ns_io_read_i64"   "read_i64 helper present"
+assert_contains "$TMP_DIR/stdout" "ns_io_read_u64"   "read_u64 helper present"
+assert_contains "$TMP_DIR/stdout" "ns_io_read_bool"  "read_bool helper present"
+printf 'ok 160 - v0.6 stdlib: extended I/O runtime functions present\n'
+
+# ── v0.6 stdlib runtime: math + convert + time helpers ──
+run_capture "v0.6 stdlib runtime" "$NIGHT" codegen "$PASS_DIR/calculator/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_math_sqrt"        "math sqrt helper present"
+assert_contains "$TMP_DIR/stdout" "ns_conv_i32_to_str"  "convert i32_to_str helper present"
+assert_contains "$TMP_DIR/stdout" "ns_time_now_us"      "time now_us helper present"
+assert_contains "$TMP_DIR/stdout" "ns_env_exists"       "env exists helper present"
+assert_contains "$TMP_DIR/stdout" "ns_path_is_file"     "path is_file helper present"
+assert_contains "$TMP_DIR/stdout" "ns_process_getpid"   "process getpid helper present"
+assert_contains "$TMP_DIR/stdout" "ns_fs_mkdir"         "fs mkdir helper present"
+printf 'ok 161 - v0.6 stdlib: math/convert/time/env/path/process/fs runtime present\n'

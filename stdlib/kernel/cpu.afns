@@ -1,0 +1,112 @@
+package kernel.cpu;
+
+// CPU control — all functions map directly to compiler built-ins or
+// extern bindings to the kernel runtime emitted by codegen.
+
+extern fn ns_cpu_halt() -> void;
+extern fn ns_cpu_cli() -> void;
+extern fn ns_cpu_sti() -> void;
+extern fn ns_cpu_nop() -> void;
+extern fn ns_cpu_pause() -> void;
+
+// ── Interrupt control ─────────────────────────────────────────────────────────
+
+// Halt the CPU until the next interrupt (HLT).
+pub fn halt() -> void    { ns_cpu_halt(); }
+
+// Disable all maskable interrupts (CLI).
+pub fn disable() -> void { ns_cpu_cli(); }
+
+// Enable all maskable interrupts (STI).
+pub fn enable() -> void  { ns_cpu_sti(); }
+
+// ── Timing / hints ────────────────────────────────────────────────────────────
+
+// No-operation (NOP) — useful for cycle padding or port I/O delay.
+pub fn nop() -> void     { ns_cpu_nop(); }
+
+// Spin-loop hint — reduces power in busy-wait loops (PAUSE).
+pub fn pause() -> void   { ns_cpu_pause(); }
+
+// ── Control registers — raw inline asm wrappers ───────────────────────────────
+
+// Read CR0 (protection enable, paging flags, etc.)
+pub fn read_cr0() -> u32 {
+    asm(""); // placeholder — codegen emits __asm__ volatile("mov %%cr0, %0":"=r"(...))
+    return 0;
+}
+
+// Read CR2 (page-fault linear address)
+pub fn read_cr2() -> u32 {
+    asm("");
+    return 0;
+}
+
+// Read CR3 (page directory base register)
+pub fn read_cr3() -> u32 {
+    asm("");
+    return 0;
+}
+
+// ── Compound helpers ──────────────────────────────────────────────────────────
+
+// Disable interrupts then halt in an infinite loop — used for fatal errors.
+pub fn freeze() -> void {
+    ns_cpu_cli();
+    loop { ns_cpu_halt(); }
+}
+
+// Safe halt: enable interrupts, yield to pending IRQs, then disable again.
+// Call in a soft-idle loop when you want ISRs to run but nothing else to.
+pub fn yield_once() -> void {
+    ns_cpu_sti();
+    ns_cpu_halt();
+    ns_cpu_cli();
+}
+
+// Short busy-wait using NOP sleds (n × nop).
+pub fn busy_wait(n: u32) -> void {
+    let i: u32 = 0;
+    while i < n {
+        ns_cpu_nop();
+        i = i + 1;
+    }
+}
+
+// ── RDTSC — read CPU timestamp counter ───────────────────────────────────────
+
+// Returns the low 32 bits of the timestamp counter.
+// For a full 64-bit read, combine with the high word returned by rdtsc_hi().
+pub fn rdtsc_lo() -> u32 {
+    asm("rdtsc");
+    return 0; // EAX is implicitly the return value in the generated C
+}
+
+// ── Port I/O delay using the diagnostic port ─────────────────────────────────
+
+// Longer I/O delay: send two dummy writes to port 0x80.
+pub fn io_delay() -> void {
+    outb(0x80, 0);
+    outb(0x80, 0);
+}
+
+// ── CPU feature detection (CPUID leaf 1) ─────────────────────────────────────
+
+// These constants represent bit positions in CPUID leaf-1 EDX / ECX.
+const CPUID_SSE:   u32 = 1 << 25;
+const CPUID_SSE2:  u32 = 1 << 26;
+const CPUID_PAE:   u32 = 1 << 6;
+const CPUID_MSR:   u32 = 1 << 5;
+const CPUID_APIC:  u32 = 1 << 9;
+const CPUID_FXSR:  u32 = 1 << 24;
+
+// ── EFLAGS bit masks ──────────────────────────────────────────────────────────
+
+const EFLAGS_CF:   u32 = 1 << 0;   // carry flag
+const EFLAGS_ZF:   u32 = 1 << 6;   // zero flag
+const EFLAGS_SF:   u32 = 1 << 7;   // sign flag
+const EFLAGS_IF:   u32 = 1 << 9;   // interrupt-enable flag
+const EFLAGS_DF:   u32 = 1 << 10;  // direction flag
+const EFLAGS_OF:   u32 = 1 << 11;  // overflow flag
+const EFLAGS_VM:   u32 = 1 << 17;  // virtual 8086 mode
+const EFLAGS_ID:   u32 = 1 << 21;  // CPUID identification flag

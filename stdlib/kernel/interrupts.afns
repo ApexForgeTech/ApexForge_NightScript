@@ -1,0 +1,118 @@
+package kernel.interrupts;
+
+// IDT + PIC (8259A) management.
+// The kernel runtime (emitted by codegen) provides the ns_idt_* and ns_pic_*
+// implementations.
+
+extern fn ns_interrupts_init() -> void;
+extern fn ns_irq_register(irq: u8, handler: *u8) -> void;
+extern fn ns_pic_eoi(irq: u8) -> void;
+extern fn ns_pic_remap(offset1: u8, offset2: u8) -> void;
+extern fn ns_idt_install() -> void;
+
+// ── High-level API ────────────────────────────────────────────────────────────
+
+// Full initialization: set up IDT, remap PIC (IRQ 0–7 → INT 0x20–0x27,
+// IRQ 8–15 → INT 0x28–0x2F), then load the IDT register.
+pub fn init() -> void { ns_interrupts_init(); }
+
+// Register an IRQ handler function pointer for hardware IRQ line `irq`.
+// handler must be a void (*)(void) C function.
+pub fn register_irq(irq: u8, handler: *u8) -> void { ns_irq_register(irq, handler); }
+
+// Send End-Of-Interrupt to the PIC for the given IRQ line.
+pub fn end_of_interrupt(irq: u8) -> void { ns_pic_eoi(irq); }
+
+// Remap the PIC to custom interrupt vector offsets.
+// Default mapping: master = 0x20, slave = 0x28.
+pub fn remap_pic(master: u8, slave: u8) -> void { ns_pic_remap(master, slave); }
+
+// Reload the IDTR — useful after modifying the IDT at runtime.
+pub fn load_idt() -> void { ns_idt_install(); }
+
+// ── Hardware IRQ numbers (before PIC remapping) ───────────────────────────────
+
+const IRQ_TIMER:    u8 = 0;    // PIT channel 0
+const IRQ_KEYBOARD: u8 = 1;    // PS/2 keyboard
+const IRQ_CASCADE:  u8 = 2;    // slave PIC cascade
+const IRQ_COM2:     u8 = 3;    // serial COM2 / COM4
+const IRQ_COM1:     u8 = 4;    // serial COM1 / COM3
+const IRQ_LPT2:     u8 = 5;    // parallel port 2 / sound card
+const IRQ_FLOPPY:   u8 = 6;    // floppy disk controller
+const IRQ_LPT1:     u8 = 7;    // parallel port 1 (spurious IRQ)
+const IRQ_RTC:      u8 = 8;    // real-time clock
+const IRQ_REDIR1:   u8 = 9;    // redirected / available
+const IRQ_REDIR2:   u8 = 10;   // redirected / available
+const IRQ_REDIR3:   u8 = 11;   // redirected / available
+const IRQ_MOUSE:    u8 = 12;   // PS/2 mouse
+const IRQ_FPU:      u8 = 13;   // FPU / coprocessor
+const IRQ_ATA1:     u8 = 14;   // primary ATA / IDE
+const IRQ_ATA2:     u8 = 15;   // secondary ATA / IDE
+
+// ── Interrupt vector numbers (after default PIC remapping) ────────────────────
+
+const INT_TIMER:    u8 = 0x20;
+const INT_KEYBOARD: u8 = 0x21;
+const INT_COM2:     u8 = 0x23;
+const INT_COM1:     u8 = 0x24;
+const INT_FLOPPY:   u8 = 0x26;
+const INT_LPT1:     u8 = 0x27;
+const INT_RTC:      u8 = 0x28;
+const INT_MOUSE:    u8 = 0x2C;
+const INT_ATA1:     u8 = 0x2E;
+const INT_ATA2:     u8 = 0x2F;
+
+// ── CPU exception vectors (INT 0x00–0x1F) ────────────────────────────────────
+
+const EXC_DIVIDE_BY_ZERO:    u8 = 0x00;
+const EXC_DEBUG:             u8 = 0x01;
+const EXC_NMI:               u8 = 0x02;
+const EXC_BREAKPOINT:        u8 = 0x03;
+const EXC_OVERFLOW:          u8 = 0x04;
+const EXC_BOUND_RANGE:       u8 = 0x05;
+const EXC_INVALID_OPCODE:    u8 = 0x06;
+const EXC_DEVICE_NOT_AVAIL:  u8 = 0x07;
+const EXC_DOUBLE_FAULT:      u8 = 0x08;
+const EXC_INVALID_TSS:       u8 = 0x0A;
+const EXC_SEG_NOT_PRESENT:   u8 = 0x0B;
+const EXC_STACK_FAULT:       u8 = 0x0C;
+const EXC_GENERAL_PROTECT:   u8 = 0x0D;
+const EXC_PAGE_FAULT:        u8 = 0x0E;
+const EXC_FPU_ERROR:         u8 = 0x10;
+const EXC_ALIGN_CHECK:       u8 = 0x11;
+const EXC_MACHINE_CHECK:     u8 = 0x12;
+const EXC_SIMD_FP:           u8 = 0x13;
+
+// ── PIC mask helpers ──────────────────────────────────────────────────────────
+
+// Mask (disable) a hardware IRQ line on the PIC.
+pub fn mask_irq(irq: u8) -> void {
+    let port: u16 = 0x21;
+    if irq >= 8 { port = 0xA1; }
+    let irq_bit: u8 = irq;
+    if irq >= 8 { irq_bit = irq - 8; }
+    let val: u8 = inb(port);
+    outb(port, val | (1 << irq_bit));
+}
+
+// Unmask (enable) a hardware IRQ line on the PIC.
+pub fn unmask_irq(irq: u8) -> void {
+    let port: u16 = 0x21;
+    if irq >= 8 { port = 0xA1; }
+    let irq_bit: u8 = irq;
+    if irq >= 8 { irq_bit = irq - 8; }
+    let val: u8 = inb(port);
+    outb(port, val & ~(1 << irq_bit));
+}
+
+// Mask all IRQs on both PIC chips.
+pub fn mask_all() -> void {
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+}
+
+// Unmask all IRQs on both PIC chips.
+pub fn unmask_all() -> void {
+    outb(0x21, 0x00);
+    outb(0xA1, 0x00);
+}

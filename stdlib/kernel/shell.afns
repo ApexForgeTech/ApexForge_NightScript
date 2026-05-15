@@ -1,0 +1,61 @@
+package kernel.shell;
+
+// NightOS Basic Shell — v0.6.
+// The codegen runtime provides ns_shell_init, ns_shell_on_key, ns_shell_exec.
+// The shell maintains its own line-editing buffer and dispatches commands
+// to the terminal indexed by _ns_shell_term.
+
+extern fn ns_shell_init(term_idx: i32) -> void;
+extern fn ns_shell_on_key(scancode: u8) -> void;
+extern fn ns_shell_exec(cmd: cstr) -> void;
+extern fn ns_os_init() -> void;
+extern fn ns_os_poll() -> void;
+extern fn ns_os_render() -> void;
+
+// ── Shell lifecycle ───────────────────────────────────────────────────────────
+
+// Bind the shell to a terminal and print the welcome banner + prompt.
+// Must be called after terminal.init() for the target terminal index.
+pub fn init(term_idx: i32) -> void { ns_shell_init(term_idx); }
+
+// Feed a PS/2 scancode (make code) to the shell's line editor.
+// The shell accumulates characters until Enter is pressed, then calls exec().
+pub fn on_key(scancode: u8) -> void { ns_shell_on_key(scancode); }
+
+// Execute a single null-terminated command string directly.
+// Useful for programmatic commands without keyboard input.
+pub fn exec(cmd: cstr) -> void { ns_shell_exec(cmd); }
+
+// ── OS event loop helpers ─────────────────────────────────────────────────────
+
+// Initialize all v0.6 OS subsystems (WM, terminal slots, shell state).
+// Call once at the start of kernel main(), before mouse and framebuffer init.
+pub fn os_init() -> void { ns_os_init(); }
+
+// Poll for pending keyboard events and route them to the active shell.
+// Call once per iteration of the main event loop.
+pub fn os_poll() -> void { ns_os_poll(); }
+
+// Redraw the desktop: WM, all terminals, and the mouse cursor.
+// Call once per iteration after os_poll().
+pub fn os_render() -> void { ns_os_render(); }
+
+// ── Built-in command list ─────────────────────────────────────────────────────
+//
+// The following commands are recognized by ns_shell_exec():
+//
+//   help            — list all built-in commands
+//   clear           — clear the terminal and reprint the prompt
+//   version         — print NightOS version string
+//   halt            — disable interrupts and halt the CPU permanently
+//   mem             — print the PMM free page count
+//   echo <text>     — print <text> followed by a newline
+
+// ── Input buffer constants ────────────────────────────────────────────────────
+
+const CMD_BUF_SIZE: i32 = 256;   // maximum command line length (bytes)
+
+// ── Prompt string ─────────────────────────────────────────────────────────────
+
+// The prompt printed before each command is "> ".
+// The welcome banner is "NightOS v0.6 — NightScript Shell".

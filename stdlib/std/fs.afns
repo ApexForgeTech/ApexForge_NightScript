@@ -1,42 +1,108 @@
 package std.fs;
 
-extern "C" fn fopen(path: cstr, mode: cstr) -> *u8;
-extern "C" fn fclose(fp: *u8) -> i32;
-extern "C" fn fread(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
-extern "C" fn fwrite(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
-extern "C" fn fseek(fp: *u8, offset: i64, whence: i32) -> i32;
-extern "C" fn ftell(fp: *u8) -> i64;
-extern "C" fn remove(path: cstr) -> i32;
-extern "C" fn rename(old: cstr, new: cstr) -> i32;
+extern fn fopen(path: cstr, mode: cstr) -> *u8;
+extern fn fclose(fp: *u8) -> i32;
+extern fn fread(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
+extern fn fwrite(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
+extern fn fseek(fp: *u8, offset: i64, whence: i32) -> i32;
+extern fn ftell(fp: *u8) -> i64;
+extern fn rewind(fp: *u8) -> void;
+extern fn fflush(fp: *u8) -> i32;
+extern fn feof(fp: *u8) -> i32;
+extern fn ferror(fp: *u8) -> i32;
+extern fn clearerr(fp: *u8) -> void;
+extern fn remove(path: cstr) -> i32;
+extern fn rename(old_path: cstr, new_path: cstr) -> i32;
+extern fn fputs(s: cstr, fp: *u8) -> i32;
+extern fn fgets(buf: *u8, n: i32, fp: *u8) -> *u8;
+extern fn fgetc(fp: *u8) -> i32;
+extern fn ungetc(c: i32, fp: *u8) -> i32;
 
-pub fn open(path: cstr, mode: cstr) -> *u8 {
-    return fopen(path, mode);
-}
+// NightScript codegen helpers
+extern fn ns_fs_size(fp: *u8) -> i64;
+extern fn ns_fs_mkdir(path: cstr) -> i32;
+extern fn ns_fs_rmdir(path: cstr) -> i32;
 
-pub fn close(fp: *u8) -> i32 {
-    return fclose(fp);
-}
+// ── Seek origin constants ─────────────────────────────────────────────────────
 
+const SEEK_SET: i32 = 0;   // from beginning of file
+const SEEK_CUR: i32 = 1;   // from current position
+const SEEK_END: i32 = 2;   // from end of file
+
+// ── Open / close ──────────────────────────────────────────────────────────────
+
+// Open a file. mode: "r", "w", "a", "rb", "wb", "r+", "w+", etc.
+// Returns null on failure.
+pub fn open(path: cstr, mode: cstr) -> *u8 { return fopen(path, mode); }
+
+pub fn close(fp: *u8) -> i32 { return fclose(fp); }
+
+// ── Read ──────────────────────────────────────────────────────────────────────
+
+// Read up to count bytes into buf. Returns bytes actually read.
 pub fn read(fp: *u8, buf: *u8, count: usize) -> usize {
     return fread(buf, 1, count, fp);
 }
 
+// Read a single character; returns -1 (EOF) on end-of-file or error.
+pub fn read_char(fp: *u8) -> i32 { return fgetc(fp); }
+
+// Read a line (up to n-1 bytes) into buf, including newline.
+// Returns null on EOF/error, buf on success.
+pub fn read_line(fp: *u8, buf: *u8, n: i32) -> *u8 {
+    return fgets(buf, n, fp);
+}
+
+// ── Write ─────────────────────────────────────────────────────────────────────
+
+// Write count bytes from buf. Returns bytes actually written.
 pub fn write(fp: *u8, buf: *u8, count: usize) -> usize {
     return fwrite(buf, 1, count, fp);
 }
 
+// Write a null-terminated string. Returns non-negative on success.
+pub fn write_str(fp: *u8, s: cstr) -> i32 { return fputs(s, fp); }
+
+// ── Seek / position ───────────────────────────────────────────────────────────
+
 pub fn seek(fp: *u8, offset: i64, whence: i32) -> i32 {
     return fseek(fp, offset, whence);
 }
+pub fn seek_start(fp: *u8, offset: i64) -> i32 { return fseek(fp, offset, SEEK_SET); }
+pub fn seek_cur(fp: *u8, offset: i64) -> i32   { return fseek(fp, offset, SEEK_CUR); }
+pub fn seek_end(fp: *u8, offset: i64) -> i32   { return fseek(fp, offset, SEEK_END); }
 
-pub fn tell(fp: *u8) -> i64 {
-    return ftell(fp);
-}
+pub fn tell(fp: *u8) -> i64 { return ftell(fp); }
 
-pub fn delete(path: cstr) -> i32 {
-    return remove(path);
-}
+pub fn rewind_fp(fp: *u8) -> void { rewind(fp); }
 
-pub fn move(old_path: cstr, new_path: cstr) -> i32 {
-    return rename(old_path, new_path);
-}
+// ── Size ──────────────────────────────────────────────────────────────────────
+
+// Returns the total size of the file in bytes (-1 on error).
+pub fn size(fp: *u8) -> i64 { return ns_fs_size(fp); }
+
+// ── Flush / error / EOF ───────────────────────────────────────────────────────
+
+pub fn flush(fp: *u8) -> i32 { return fflush(fp); }
+
+// True if the end-of-file indicator is set.
+pub fn is_eof(fp: *u8) -> bool { return feof(fp) != 0; }
+
+// True if the error indicator is set.
+pub fn has_error(fp: *u8) -> bool { return ferror(fp) != 0; }
+
+pub fn clear_error(fp: *u8) -> void { clearerr(fp); }
+
+// ── File system operations ────────────────────────────────────────────────────
+
+// Delete a file. Returns 0 on success.
+pub fn delete(path: cstr) -> i32 { return remove(path); }
+
+// Rename / move a file. Returns 0 on success.
+pub fn move(old_path: cstr, new_path: cstr) -> i32 { return rename(old_path, new_path); }
+
+// Create a directory (mode 0755 on POSIX). Returns 0 on success.
+pub fn mkdir(path: cstr) -> i32 { return ns_fs_mkdir(path); }
+
+// Remove an empty directory. Returns 0 on success.
+pub fn rmdir(path: cstr) -> i32 { return ns_fs_rmdir(path); }

@@ -1,8 +1,70 @@
 package kernel.mem;
 
-const PAGE_SIZE: usize = 4096;
-const PAGE_SHIFT: usize = 12;
+// Physical Memory Manager (PMM) — bitmap-based page allocator.
+// The kernel runtime (emitted by codegen) provides the ns_pmm_* implementations.
 
+extern fn ns_pmm_init(mem_kb: u32, bitmap_base: u32) -> void;
+extern fn ns_pmm_alloc() -> *u8;
+extern fn ns_pmm_free(page: *u8) -> void;
+extern fn ns_pmm_free_count() -> u32;
+
+// ── Physical page size ────────────────────────────────────────────────────────
+
+const PAGE_SIZE:  usize = 4096;
+const PAGE_SHIFT: usize = 12;
+const PAGE_MASK:  usize = 4095;   // ~PAGE_MASK for alignment
+
+// ── PMM API ───────────────────────────────────────────────────────────────────
+
+// Initialize the PMM.
+//   mem_kb:       total physical RAM in kilobytes
+//   bitmap_base:  physical address at which the page bitmap is stored
+//                 (must be PAGE_SIZE-aligned, and the memory must be mapped)
+pub fn pmm_init(mem_kb: u32, bitmap_base: u32) -> void {
+    ns_pmm_init(mem_kb, bitmap_base);
+}
+
+// Allocate one physical page (4096 bytes).
+// Returns null if no pages are available.
+pub fn pmm_alloc() -> *u8 { return ns_pmm_alloc(); }
+
+// Free a previously allocated page.
+pub fn pmm_free(page: *u8) -> void { ns_pmm_free(page); }
+
+// Return the number of free pages currently in the PMM.
+pub fn pmm_free_count() -> u32 { return ns_pmm_free_count(); }
+
+// Return the amount of free memory in bytes.
+pub fn pmm_free_bytes() -> u32 { return ns_pmm_free_count() * PAGE_SIZE as u32; }
+
+// Return the amount of free memory in kilobytes.
+pub fn pmm_free_kb() -> u32 { return ns_pmm_free_count() * 4; }
+
+// ── Address alignment helpers ─────────────────────────────────────────────────
+
+// Round addr up to the next page boundary.
+pub fn page_align_up(addr: usize) -> usize {
+    return (addr + PAGE_SIZE - 1) & ~PAGE_MASK;
+}
+
+// Round addr down to the previous page boundary.
+pub fn page_align_down(addr: usize) -> usize {
+    return addr & ~PAGE_MASK;
+}
+
+// True if addr is page-aligned (low 12 bits are zero).
+pub fn is_page_aligned(addr: usize) -> bool {
+    return (addr & PAGE_MASK) == 0;
+}
+
+// Number of pages needed to cover `bytes` bytes.
+pub fn pages_needed(bytes: usize) -> usize {
+    return (bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
+}
+
+// ── Generic address alignment ─────────────────────────────────────────────────
+
+// Round addr up to the nearest multiple of align (align must be power-of-two).
 pub fn align_up(addr: usize, align: usize) -> usize {
     return (addr + align - 1) & ~(align - 1);
 }
@@ -11,14 +73,21 @@ pub fn align_down(addr: usize, align: usize) -> usize {
     return addr & ~(align - 1);
 }
 
-pub fn page_align(addr: usize) -> usize {
-    return align_up(addr, PAGE_SIZE);
+pub fn is_aligned(addr: usize, align: usize) -> bool {
+    return (addr & (align - 1)) == 0;
 }
 
-pub fn is_page_aligned(addr: usize) -> bool {
-    return (addr & (PAGE_SIZE - 1)) == 0;
-}
+// ── Kernel virtual memory constants (typical x86 layout) ─────────────────────
 
-pub fn pages_needed(bytes: usize) -> usize {
-    return (bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
-}
+const KERNEL_BASE:   usize = 0xC0000000;   // 3 GB — start of kernel virtual space
+const USER_END:      usize = 0xBFFFFFFF;   // top of user virtual space
+const VGA_PHYS:      usize = 0x000B8000;   // VGA text buffer physical address
+const KERNEL_STACK_TOP: usize = 0xC03FF000; // default kernel stack top
+
+// ── Low-memory landmark constants ─────────────────────────────────────────────
+
+const BIOS_ROM_BASE:    usize = 0x000F0000;
+const EBDA_BASE:        usize = 0x0009FC00;
+const CONVENTIONAL_END: usize = 0x000A0000;  // end of conventional (640 KB) RAM
+const EXTENDED_START:   usize = 0x00100000;  // 1 MB — start of extended RAM
+const PMM_BITMAP_DEFAULT: usize = 0x00200000; // 2 MB — safe default bitmap location

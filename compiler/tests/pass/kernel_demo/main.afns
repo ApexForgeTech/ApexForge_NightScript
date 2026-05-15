@@ -1,0 +1,103 @@
+package kernel.demo;
+
+// ── extern bindings to the v0.5 kernel runtime ─────────────────────────────
+extern fn ns_cpu_cli() -> void;
+extern fn ns_cpu_sti() -> void;
+extern fn ns_cpu_halt() -> void;
+extern fn ns_gdt_init() -> void;
+extern fn ns_interrupts_init() -> void;
+extern fn ns_vga_clear() -> void;
+extern fn ns_vga_print(s: cstr) -> void;
+extern fn ns_vga_println(s: cstr) -> void;
+extern fn ns_vga_print_u32(n: u32) -> void;
+extern fn ns_vga_print_hex(n: u32) -> void;
+extern fn ns_vga_set_color(attr: u8) -> void;
+extern fn ns_serial_init() -> void;
+extern fn ns_serial_print(s: cstr) -> void;
+extern fn ns_serial_println(s: cstr) -> void;
+extern fn ns_timer_init(hz: u32) -> void;
+extern fn ns_timer_ticks() -> u32;
+extern fn ns_timer_wait(ms: u32) -> void;
+extern fn ns_keyboard_init() -> void;
+extern fn ns_pmm_init(mem_kb: u32, bitmap_base: u32) -> void;
+extern fn ns_pmm_alloc() -> *u8;
+extern fn ns_pmm_free_count() -> u32;
+extern fn ns_fb_init(addr: *u8, w: u32, h: u32, pitch: u32) -> void;
+extern fn ns_fb_clear(color: u32) -> void;
+extern fn ns_fb_fill(x: u32, y: u32, w: u32, h: u32, color: u32) -> void;
+extern fn ns_fb_str(x: u32, y: u32, s: cstr, fg: u32, bg: u32) -> void;
+
+// ── Subsystem helpers ───────────────────────────────────────────────────────
+fn vga_banner() -> void {
+    ns_vga_set_color(0x0B);   // cyan on black
+    ns_vga_println("=== NightOS v0.5 — ApexForge NightScript Kernel ===");
+    ns_vga_set_color(0x0F);   // back to white on black
+}
+
+fn serial_banner() -> void {
+    ns_serial_println("[NightOS] Kernel booted via NightScript v0.5");
+    ns_serial_println("[NightOS] Serial COM1 active at 38400 baud");
+}
+
+fn memory_test() -> void {
+    ns_vga_print("PMM init: ");
+    ns_pmm_init(32768, 0x200000);  // 32 MB RAM, bitmap at 2 MB mark
+    ns_vga_print_u32(ns_pmm_free_count());
+    ns_vga_println(" free pages");
+    ns_serial_print("[PMM] free pages: ");
+    ns_serial_println("ok");
+}
+
+fn timer_test() -> void {
+    ns_timer_init(1000);     // 1000 Hz = 1 tick per ms
+    ns_vga_print("Timer: 1000 Hz PIT — waiting 100ms...");
+    ns_timer_wait(100);
+    ns_vga_println(" done");
+    ns_serial_println("[TIMER] 100ms wait complete");
+}
+
+fn port_io_test() -> void {
+    let r: u8 = inb(0x64);   // PS/2 status register
+    let r32: u32 = r as u32;
+    ns_vga_print("PS/2 status: 0x");
+    ns_vga_print_hex(r32);
+    ns_vga_println("");
+    ns_serial_print("[PORTS] inb(0x64) = 0x");
+    ns_serial_println("ok");
+}
+
+fn asm_test() -> void {
+    asm("nop");   // inline assembly built-in
+    asm("nop");
+    ns_vga_println("ASM: nop executed");
+    ns_serial_println("[ASM] inline asm ok");
+}
+
+// ── Kernel main ─────────────────────────────────────────────────────────────
+kernel app NightOS {
+    fn main() -> void {
+        // kernel_main() (emitted by codegen) already calls:
+        //   ns_cpu_cli() → ns_gdt_init() → ns_interrupts_init()
+        //   ns_vga_clear() → ns_serial_init() → ns_cpu_sti()
+        // then calls this main()
+
+        vga_banner();
+        serial_banner();
+
+        memory_test();
+        timer_test();
+        port_io_test();
+        asm_test();
+
+        ns_keyboard_init();
+        ns_vga_println("Keyboard: PS/2 IRQ1 registered");
+
+        ns_vga_set_color(0x0A);  // bright green
+        ns_vga_println("\n[BOOT OK] NightOS ready. Halting CPU.");
+        ns_vga_set_color(0x0F);
+
+        ns_serial_println("[NightOS] All systems initialized. Entering halt loop.");
+
+        loop { ns_cpu_halt(); }
+    }
+}

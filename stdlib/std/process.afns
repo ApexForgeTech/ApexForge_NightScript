@@ -1,0 +1,64 @@
+package std.process;
+
+extern fn exit(code: i32) -> void;
+extern fn abort() -> void;
+extern fn getenv(name: cstr) -> cstr;
+extern fn system(cmd: cstr) -> i32;
+extern fn raise(sig: i32) -> i32;
+
+// NightScript codegen helpers (emitted by emit_stdlib_runtime)
+extern fn ns_process_getpid() -> i32;
+extern fn ns_process_getppid() -> i32;
+
+// ── Signal constants ──────────────────────────────────────────────────────────
+
+const SIGABRT: i32 = 6;
+const SIGFPE:  i32 = 8;
+const SIGILL:  i32 = 4;
+const SIGINT:  i32 = 2;
+const SIGSEGV: i32 = 11;
+const SIGTERM: i32 = 15;
+const SIGHUP:  i32 = 1;
+const SIGKILL: i32 = 9;
+const SIGPIPE: i32 = 13;
+const SIGUSR1: i32 = 10;
+const SIGUSR2: i32 = 12;
+const SIGCHLD: i32 = 17;
+const SIGALRM: i32 = 14;
+
+// ── Exit ──────────────────────────────────────────────────────────────────────
+
+// Terminate the process with the given exit code.
+pub fn quit(code: i32) -> void { exit(code); }
+
+// Terminate with EXIT_SUCCESS (0).
+pub fn quit_ok() -> void { exit(0); }
+
+// Terminate with EXIT_FAILURE (1).
+pub fn quit_fail() -> void { exit(1); }
+
+// Abort with a core dump (raises SIGABRT).
+pub fn crash() -> void { abort(); }
+
+// ── Process info ──────────────────────────────────────────────────────────────
+
+// Current process ID.
+pub fn getpid() -> i32  { return ns_process_getpid(); }
+
+// Parent process ID.
+pub fn getppid() -> i32 { return ns_process_getppid(); }
+
+// ── Signals ───────────────────────────────────────────────────────────────────
+
+// Send signal sig to the current process.
+pub fn send_signal(sig: i32) -> i32 { return raise(sig); }
+
+// ── Environment ───────────────────────────────────────────────────────────────
+
+// Get an environment variable (returns null if not set).
+pub fn env_get(name: cstr) -> cstr { return getenv(name); }
+
+// ── Shell execution ───────────────────────────────────────────────────────────
+
+// Run a shell command. Returns the command's exit status, or -1 on error.
+pub fn shell(cmd: cstr) -> i32 { return system(cmd); }
