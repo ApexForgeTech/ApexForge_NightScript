@@ -1,0 +1,33 @@
+package kernel.serial;
+
+const COM1: u16 = 0x3F8;
+const COM2: u16 = 0x2F8;
+const LSR_EMPTY: u8 = 0x20;
+
+pub fn com1_port() -> u16 {
+    return COM1;
+}
+
+pub fn com2_port() -> u16 {
+    return COM2;
+}
+
+pub fn lsr_tx_empty() -> u8 {
+    return LSR_EMPTY;
+}
+
+pub fn data_port(base: u16) -> u16 {
+    return base;
+}
+
+pub fn ier_port(base: u16) -> u16 {
+    return base + 1;
+}
+
+pub fn lcr_port(base: u16) -> u16 {
+    return base + 3;
+}
+
+pub fn lsr_port(base: u16) -> u16 {
+    return base + 5;
+}

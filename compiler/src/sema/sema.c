@@ -266,6 +266,29 @@ static int is_builtin_type(const char *name) {
     return 0;
 }
 
+/* Built-in I/O functions — always available without import or extern */
+static int is_builtin_io(const char *name) {
+    static const char *IO[] = {
+        /* stdout */
+        "print", "println",
+        /* stderr */
+        "eprint", "eprintln",
+        /* typed print */
+        "print_int", "print_long", "print_uint", "print_ulong",
+        "print_f32", "print_f64", "print_bool", "print_char",
+        /* flush */
+        "flush",
+        /* stdin */
+        "input", "read_int", "read_long", "read_uint", "read_f64",
+        /* stream objects */
+        "stdout", "stderr", "stdin",
+        NULL
+    };
+    for (int i = 0; IO[i]; i++)
+        if (!strcmp(IO[i], name)) return 1;
+    return 0;
+}
+
 static int is_known_type(Analyzer *a, const char *name) {
     return is_builtin_type(name) ||
            find_named_decl(a->structs, a->struct_count, name) ||
@@ -779,15 +802,27 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
         case NODE_LIT_NULL:
             return 1;
 
-        case NODE_IDENT:
-            if (!strcmp(expr->as.ident.name, "None"))
+        case NODE_IDENT: {
+            const char *iname = expr->as.ident.name;
+            if (!strcmp(iname, "None"))
                 return 1;
-            if (!scope_resolve(scope, expr->as.ident.name)) {
-                sema_error(a, expr->line, expr->col,
-                           "unknown symbol '%s'", expr->as.ident.name);
-                return 0;
+            if (is_builtin_io(iname))
+                return 1;
+            if (scope_resolve(scope, iname))
+                return 1;
+            /* check global names (functions, structs, enums, consts, etc.) */
+            for (int gi = 0; gi < a->global_name_count; gi++) {
+                if (!strcmp(a->global_names[gi], iname))
+                    return 1;
             }
-            return 1;
+            /* check functions and extern functions */
+            if (find_named_decl(a->functions, a->function_count, iname) ||
+                find_named_decl(a->extern_functions, a->extern_function_count, iname))
+                return 1;
+            sema_error(a, expr->line, expr->col,
+                       "unknown symbol '%s'", iname);
+            return 0;
+        }
 
         case NODE_GROUP:
             return analyze_expr(a, scope, expr->as.group.expr);
@@ -1204,6 +1239,10 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
                 if (!register_union_decl(&a, decl))
                     a.had_error = 1;
                 break;
+            case NODE_CONST:
+                if (!register_global_name(&a, decl->as.konst.name, decl))
+                    a.had_error = 1;
+                break;
             default:
                 break;
         }
@@ -1258,6 +1297,14 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
                 if (!register_impl_decl(&a, decl))
                     a.had_error = 1;
                 break;
+            case NODE_KERNEL_APP:
+                for (int j = 0; j < decl->as.kernel_app.fns.count && !a.had_error; j++) {
+                    if (!register_function_like(&a, decl->as.kernel_app.fns.items[j], 0)) {
+                        if (!a.had_error)
+                            sema_error(&a, decl->line, decl->col, "out of memory");
+                    }
+                }
+                break;
             default:
                 break;
         }
@@ -1272,6 +1319,11 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
         } else if (decl->kind == NODE_IMPL_DECL) {
             for (int j = 0; j < decl->as.impl.methods.count && !a.had_error; j++) {
                 if (!analyze_function_body(&a, decl->as.impl.methods.items[j]))
+                    a.had_error = 1;
+            }
+        } else if (decl->kind == NODE_KERNEL_APP) {
+            for (int j = 0; j < decl->as.kernel_app.fns.count && !a.had_error; j++) {
+                if (!analyze_function_body(&a, decl->as.kernel_app.fns.items[j]))
                     a.had_error = 1;
             }
         }

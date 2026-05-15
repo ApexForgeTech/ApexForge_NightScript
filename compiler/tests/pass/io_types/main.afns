@@ -1,0 +1,22 @@
+package io_types;
+
+extern fn ns_io_println(s: cstr) -> void;
+extern fn ns_io_print_i32(n: i32) -> void;
+extern fn ns_io_print_i64(n: i64) -> void;
+extern fn ns_io_print_u32(n: u32) -> void;
+extern fn ns_io_print_u64(n: u64) -> void;
+extern fn ns_io_print_f64(n: f64) -> void;
+extern fn ns_io_print_bool(b: bool) -> void;
+extern fn ns_io_flush() -> void;
+
+fn main() -> void {
+    ns_io_print_i32(-42);
+    ns_io_print_i64(1000000000000);
+    ns_io_print_u32(4294967295);
+    ns_io_print_u64(18446744073709551615);
+    ns_io_print_f64(3.14);
+    ns_io_print_bool(true);
+    ns_io_print_bool(false);
+    ns_io_println("done");
+    ns_io_flush();
+}

@@ -1,0 +1,32 @@
+package inputtest;
+
+ui app InputDemo {
+    window("Input Demo") {
+        width:  600;
+        height: 400;
+
+        label("Enter text:") {}
+
+        input("Type here...") {
+            onChange {
+                let updated: i32 = 1;
+            }
+            onKey {
+                let key_pressed: i32 = 1;
+            }
+        }
+
+        row {
+            button("Submit") {
+                onClick {
+                    let submitted: i32 = 1;
+                }
+            }
+            button("Clear") {
+                onClick {
+                    let cleared: i32 = 1;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,44 @@
+package std.io;
+
+// Low-level bindings — implemented as static inline helpers in codegen runtime.
+// All ns_io_* functions are emitted automatically when this package is used.
+extern fn ns_io_print(s: cstr) -> void;
+extern fn ns_io_println(s: cstr) -> void;
+extern fn ns_io_eprint(s: cstr) -> void;
+extern fn ns_io_eprintln(s: cstr) -> void;
+extern fn ns_io_print_i32(n: i32) -> void;
+extern fn ns_io_print_i64(n: i64) -> void;
+extern fn ns_io_print_u32(n: u32) -> void;
+extern fn ns_io_print_u64(n: u64) -> void;
+extern fn ns_io_print_f64(n: f64) -> void;
+extern fn ns_io_print_bool(b: bool) -> void;
+extern fn ns_io_flush() -> void;
+extern fn ns_io_readln() -> cstr;
+extern fn ns_io_read_i32() -> i32;
+extern fn ns_io_read_u32() -> u32;
+extern fn ns_io_read_f64() -> f64;
+
+// stdout
+pub fn print(s: cstr) -> void      { ns_io_print(s); }
+pub fn println(s: cstr) -> void    { ns_io_println(s); }
+
+// stderr
+pub fn eprint(s: cstr) -> void     { ns_io_eprint(s); }
+pub fn eprintln(s: cstr) -> void   { ns_io_eprintln(s); }
+
+// typed print — numbers and bools
+pub fn print_int(n: i32) -> void   { ns_io_print_i32(n); }
+pub fn print_long(n: i64) -> void  { ns_io_print_i64(n); }
+pub fn print_uint(n: u32) -> void  { ns_io_print_u32(n); }
+pub fn print_ulong(n: u64) -> void { ns_io_print_u64(n); }
+pub fn print_f64(n: f64) -> void   { ns_io_print_f64(n); }
+pub fn print_bool(b: bool) -> void { ns_io_print_bool(b); }
+
+// flush stdout
+pub fn flush() -> void             { ns_io_flush(); }
+
+// stdin — readln returns a pointer to an internal static buffer (4096 bytes)
+pub fn readln() -> cstr            { return ns_io_readln(); }
+pub fn read_int() -> i32           { return ns_io_read_i32(); }
+pub fn read_uint() -> u32          { return ns_io_read_u32(); }
+pub fn read_f64() -> f64           { return ns_io_read_f64(); }

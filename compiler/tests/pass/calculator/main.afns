@@ -1,0 +1,21 @@
+package calculator;
+
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+fn sub(a: i32, b: i32) -> i32 { return a - b; }
+fn mul(a: i32, b: i32) -> i32 { return a * b; }
+
+fn main() -> void {
+    println("=== NightScript Calculator ===");
+
+    println("Birinci eded:");
+    let a: i32 = read_int();
+
+    println("Ikinci eded:");
+    let b: i32 = read_int();
+
+    print("Toplama:  "); print_int(add(a, b)); println("");
+    print("Cixma:    "); print_int(sub(a, b)); println("");
+    print("Vurma:    "); print_int(mul(a, b)); println("");
+
+    stdout.flush();
+}

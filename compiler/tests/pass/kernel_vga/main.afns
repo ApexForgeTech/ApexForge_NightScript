@@ -1,0 +1,22 @@
+package kernel.vgatest;
+
+struct Color {
+    fg: u8;
+    bg: u8;
+}
+
+kernel app VGADemo {
+    fn make_color(fg: u8, bg: u8) -> Color {
+        return Color { fg: fg, bg: bg };
+    }
+
+    fn vga_offset(row: i32, col: i32) -> i32 {
+        return row * 80 + col;
+    }
+
+    fn main() -> void {
+        let white: Color = make_color(15, 0);
+        let offset: i32 = vga_offset(0, 0);
+        if white.fg == 15 { offset; }
+    }
+}

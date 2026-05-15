@@ -1314,6 +1314,14 @@ static int program_has_ui(CompileState *state) {
     return 0;
 }
 
+static int program_has_kernel(CompileState *state) {
+    if (!state->ast) return 0;
+    for (int i = 0; i < state->ast->as.program.decls.count; i++)
+        if (state->ast->as.program.decls.items[i]->kind == NODE_KERNEL_APP)
+            return 1;
+    return 0;
+}
+
 static int build_binary(const char *src_path, const char *binary_path,
                         const char *opt_flags) {
     CompileState state;
@@ -1324,18 +1332,25 @@ static int build_binary(const char *src_path, const char *binary_path,
     if (!compile_source(src_path, &state))
         return 1;
 
-    /* build extra flags: opt_flags + SDL2 if UI app */
+    /* build extra flags: opt_flags + SDL2 if UI, freestanding if kernel */
     {
+        int is_kernel = program_has_kernel(&state);
         const char *sdl = program_has_ui(&state) ? " -lSDL2" : "";
-        const char *opt = opt_flags ? opt_flags : "-g";
-        size_t len = strlen(opt) + strlen(sdl) + 1;
+        const char *kflags = is_kernel
+            ? "-ffreestanding -nostdlib -nostdinc -m32 -O2 -fno-stack-protector -fno-pic"
+            : "";
+        const char *opt = (is_kernel || opt_flags) ? (is_kernel ? "" : opt_flags) : "-g";
+        size_t len = strlen(kflags) + strlen(opt) + strlen(sdl) + 4;
         extra_flags = malloc(len);
         if (!extra_flags) {
             fprintf(stderr, "error: out of memory\n");
             compile_state_free(&state);
             return 1;
         }
-        snprintf(extra_flags, len, "%s%s", opt, sdl);
+        if (is_kernel)
+            snprintf(extra_flags, len, "%s", kflags);
+        else
+            snprintf(extra_flags, len, "%s%s", opt, sdl);
     }
 
     c_path = replace_extension(binary_path, ".generated.c");
@@ -1484,14 +1499,16 @@ int main(int argc, char **argv) {
         if (!resolve_input_path(cmd, path, &resolved_path, &resolved_output, NULL))
             return 1;
         {
-            int rc = clean_outputs(resolved_path, resolved_output) ? 0 : 1;
+            /* user -o takes priority over resolved project output */
+            const char *clean_out = output_path ? output_path : resolved_output;
+            int rc = clean_outputs(resolved_path, clean_out) ? 0 : 1;
             free(resolved_path);
             free(resolved_output);
             return rc;
         }
     }
 
-    /* suppress unused warning — target_arch may be used for cross-compilation later */
+    /* target_arch is stored in project config; kernel target selects freestanding flags */
     (void)target_arch;
 
     {

@@ -1,0 +1,17 @@
+package io_basic;
+
+extern fn ns_io_print(s: cstr) -> void;
+extern fn ns_io_println(s: cstr) -> void;
+extern fn ns_io_eprint(s: cstr) -> void;
+extern fn ns_io_readln() -> cstr;
+
+fn greet(name: cstr) -> void {
+    ns_io_print("Hello, ");
+    ns_io_println(name);
+}
+
+fn main() -> void {
+    ns_io_println("NightScript I/O test");
+    greet("world");
+    ns_io_eprint("stderr: ok");
+}

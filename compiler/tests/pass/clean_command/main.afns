@@ -1,0 +1,8 @@
+package cleantest;
+
+extern "C" fn puts(s: cstr) -> i32;
+
+fn main() -> i32 {
+    puts("clean test");
+    return 0;
+}

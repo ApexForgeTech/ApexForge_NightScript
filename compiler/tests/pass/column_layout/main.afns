@@ -1,0 +1,18 @@
+package columntest;
+
+ui app ColumnDemo {
+    window("Column Layout") {
+        width:  640;
+        height: 480;
+
+        column {
+            label("Top section") {}
+            button("Middle button") {
+                onClick {
+                    let x: i32 = 1;
+                }
+            }
+            label("Bottom section") {}
+        }
+    }
+}

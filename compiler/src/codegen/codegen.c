@@ -50,6 +50,8 @@ static void emit_type_left(COut *o, Node *t);
 static void emit_type_right(COut *o, Node *t);
 static const char *header_for_extern(const char *name);
 static void format_slice_type_name(Node *type, char *buf, size_t size);
+static int has_ui_app(Node *prog);
+static int has_kernel_app(Node *prog);
 
 typedef struct SliceDef SliceDef;
 typedef struct OptionResultDef OptionResultDef;
@@ -760,6 +762,10 @@ typedef struct {
     IntStack    scope_defer_markers;
     IntStack    loop_defer_markers;
 } CGContext;
+
+static void emit_stmt(COut *o, CGContext *cg, Node *n);
+static void emit_scope_defers(COut *o, CGContext *cg);
+static int stmt_terminates_control_flow(Node *n);
 
 static int intstack_push(IntStack *stack, int value) {
     int *new_items;
@@ -1991,6 +1997,91 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             Node *enum_decl = NULL;
             NodeList *fields = NULL;
             MethodResolution method = resolve_method_call(cg, n);
+
+            /* ── built-in I/O call emission ── */
+            if (n->as.call.callee && n->as.call.callee->kind == NODE_IDENT) {
+                const char *nm = n->as.call.callee->as.ident.name;
+                Node *a0 = n->as.call.args.count > 0 ? n->as.call.args.items[0] : NULL;
+#define _IO_ARG0  do { emit(o, "("); emit_expr(o, cg, a0); emit(o, ")"); } while(0)
+                /* stdout — no-newline */
+                if (!strcmp(nm, "print")) {
+                    emit(o, "fputs("); emit_expr(o, cg, a0); emit(o, ", stdout)");
+                    break;
+                }
+                /* stdout — with newline (reuse puts) */
+                if (!strcmp(nm, "println")) {
+                    emit(o, "puts"); _IO_ARG0;
+                    break;
+                }
+                /* stderr — no-newline */
+                if (!strcmp(nm, "eprint")) {
+                    emit(o, "fputs("); emit_expr(o, cg, a0); emit(o, ", stderr)");
+                    break;
+                }
+                /* stderr — with newline */
+                if (!strcmp(nm, "eprintln")) {
+                    emit(o, "(fputs("); emit_expr(o, cg, a0);
+                    emit(o, ", stderr), fputc('\\n', stderr))");
+                    break;
+                }
+                /* typed print */
+                if (!strcmp(nm, "print_int"))   { emit(o, "ns_io_print_i32");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_long"))  { emit(o, "ns_io_print_i64");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_uint"))  { emit(o, "ns_io_print_u32");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_ulong")) { emit(o, "ns_io_print_u64");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_f32"))   { emit(o, "ns_io_print_f64");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_f64"))   { emit(o, "ns_io_print_f64");  _IO_ARG0; break; }
+                if (!strcmp(nm, "print_bool"))  { emit(o, "ns_io_print_bool"); _IO_ARG0; break; }
+                if (!strcmp(nm, "print_char"))  { emit(o, "putchar");          _IO_ARG0; break; }
+                /* flush stdout */
+                if (!strcmp(nm, "flush")) {
+                    emit(o, "fflush(stdout)");
+                    break;
+                }
+                /* stdin — read line, no prompt (like Python input()) */
+                if (!strcmp(nm, "input")) {
+                    if (a0) {
+                        /* input("prompt") → print prompt then read */
+                        emit(o, "(fputs("); emit_expr(o, cg, a0);
+                        emit(o, ", stdout), fflush(stdout), ns_io_readln())");
+                    } else {
+                        emit(o, "ns_io_readln()");
+                    }
+                    break;
+                }
+                /* typed read */
+                if (!strcmp(nm, "read_int"))  { emit(o, "ns_io_read_i32()");  break; }
+                if (!strcmp(nm, "read_long")) { emit(o, "ns_io_read_i64()");  break; }
+                if (!strcmp(nm, "read_uint")) { emit(o, "ns_io_read_u32()");  break; }
+                if (!strcmp(nm, "read_f64"))  { emit(o, "ns_io_read_f64()");  break; }
+#undef _IO_ARG0
+            }
+            /* stream method calls: stdout.flush(), stderr.flush(),
+               stdout.write(s), stderr.write(s), stdin.read_line(),
+               stdin.read_int(), stdin.read_f64()                       */
+            if (n->as.call.callee && n->as.call.callee->kind == NODE_FIELD) {
+                Node *obj   = n->as.call.callee->as.field.object;
+                const char *fld = n->as.call.callee->as.field.field;
+                if (obj && obj->kind == NODE_IDENT) {
+                    const char *on = obj->as.ident.name;
+                    Node *a0 = n->as.call.args.count > 0 ? n->as.call.args.items[0] : NULL;
+                    if (!strcmp(on, "stdout") && !strcmp(fld, "flush"))
+                        { emit(o, "fflush(stdout)"); break; }
+                    if (!strcmp(on, "stderr") && !strcmp(fld, "flush"))
+                        { emit(o, "fflush(stderr)"); break; }
+                    if (!strcmp(on, "stdout") && !strcmp(fld, "write") && a0)
+                        { emit(o, "fputs("); emit_expr(o, cg, a0); emit(o, ", stdout)"); break; }
+                    if (!strcmp(on, "stderr") && !strcmp(fld, "write") && a0)
+                        { emit(o, "fputs("); emit_expr(o, cg, a0); emit(o, ", stderr)"); break; }
+                    if (!strcmp(on, "stdin") && !strcmp(fld, "read_line"))
+                        { emit(o, "ns_io_readln()"); break; }
+                    if (!strcmp(on, "stdin") && !strcmp(fld, "read_int"))
+                        { emit(o, "ns_io_read_i32()"); break; }
+                    if (!strcmp(on, "stdin") && !strcmp(fld, "read_f64"))
+                        { emit(o, "ns_io_read_f64()"); break; }
+                }
+            }
+
             if (n->as.call.callee &&
                 n->as.call.callee->kind == NODE_FIELD &&
                 n->as.call.callee->as.field.object &&
@@ -2544,6 +2635,9 @@ static const char *header_for_extern(const char *name) {
         return "string.h";
     }
 
+    if (strncmp(name, "ns_io_", 6) == 0)
+        return "stdio.h";
+
     return NULL;
 }
 
@@ -2553,7 +2647,7 @@ static void emit_standard_headers(COut *o, Node *prog) {
     int need_stdbool = 1;
     int need_stddef = 1;
     int need_stdint = 1;
-    int need_stdio = 0;
+    int need_stdio = 1;  /* always needed — io runtime uses fputs/puts/scanf */
     int need_stdlib = 0;
     int need_string = 0;
 
@@ -2775,6 +2869,18 @@ static void emit_prototypes(COut *o, Node *prog) {
     for (int i = 0; i < prog->as.program.decls.count; i++) {
         Node *d = prog->as.program.decls.items[i];
 
+        /* top-level const — emit as static const or #define */
+        if (d->kind == NODE_CONST) {
+            COut tmp;
+            tmp.buf = malloc(256); tmp.len = 0; tmp.cap = 256; tmp.indent = 0;
+            if (tmp.buf) { tmp.buf[0] = '\0';
+                CGContext cg0 = { .program = prog };
+                emit_expr(&tmp, &cg0, d->as.konst.value);
+                emit(o, "#define %s (%s)\n", d->as.konst.name, tmp.buf);
+                free(tmp.buf);
+            }
+        }
+
         if (d->kind == NODE_EXTERN_FN) {
             if (header_for_extern(d->as.extern_fn.name))
                 continue;
@@ -2785,7 +2891,14 @@ static void emit_prototypes(COut *o, Node *prog) {
 
         if (d->kind == NODE_FN_DECL) {
             make_c_name(cname, sizeof(cname), d->as.fn.owner_type, d->as.fn.name);
-            emit_fn_sig(o, cname, &d->as.fn.params, d->as.fn.ret_type);
+            int is_ep = !d->as.fn.owner_type &&
+                        !strcmp(d->as.fn.name, "main") &&
+                        d->as.fn.params.count == 0 &&
+                        !has_ui_app(prog) && !has_kernel_app(prog);
+            if (is_ep)
+                emit(o, "int main(void)");
+            else
+                emit_fn_sig(o, cname, &d->as.fn.params, d->as.fn.ret_type);
             emit(o, ";\n");
         }
 
@@ -2810,8 +2923,15 @@ static void emit_definitions(COut *o, Node *prog) {
 
         if (d->kind == NODE_FN_DECL) {
             make_c_name(cname, sizeof(cname), d->as.fn.owner_type, d->as.fn.name);
+            int is_entry = !d->as.fn.owner_type &&
+                           !strcmp(d->as.fn.name, "main") &&
+                           d->as.fn.params.count == 0 &&
+                           !has_ui_app(prog) && !has_kernel_app(prog);
             emit(o, "\n");
-            emit_fn_sig(o, cname, &d->as.fn.params, d->as.fn.ret_type);
+            if (is_entry)
+                emit(o, "int main(void)");
+            else
+                emit_fn_sig(o, cname, &d->as.fn.params, d->as.fn.ret_type);
             emit(o, "\n");
             cg.defer_count = 0; /* reset defers per function */
             cg.current_return_type = d->as.fn.ret_type;
@@ -2820,8 +2940,29 @@ static void emit_definitions(COut *o, Node *prog) {
                 Node *param = d->as.fn.params.items[j];
                 cg_define(&cg, param->as.let.name, param->as.let.type);
             }
-            emit_block(o, &cg, d->as.fn.body);
-            cg_pop_scope(&cg);
+            if (is_entry) {
+                /* emit body without the closing brace, then add return 0 */
+                int terminated = 0;
+                emit(o, "{\n");
+                cg_push_scope(&cg);
+                o->indent++;
+                for (int j = 0; j < d->as.fn.body->as.block.stmts.count; j++) {
+                    emit_stmt(o, &cg, d->as.fn.body->as.block.stmts.items[j]);
+                    if (stmt_terminates_control_flow(d->as.fn.body->as.block.stmts.items[j])) {
+                        terminated = 1; break;
+                    }
+                }
+                if (!terminated) emit_scope_defers(o, &cg);
+                emit_indent(o);
+                emit(o, "return 0;\n");
+                o->indent--;
+                cg_pop_scope(&cg);
+                emit_indent(o);
+                emit(o, "}");
+            } else {
+                emit_block(o, &cg, d->as.fn.body);
+                cg_pop_scope(&cg);
+            }
             emit(o, "\n");
         }
 
@@ -2832,7 +2973,7 @@ static void emit_definitions(COut *o, Node *prog) {
                 emit(o, "\n");
                 emit_fn_sig(o, cname, &m->as.fn.params, m->as.fn.ret_type);
                 emit(o, "\n");
-                cg.defer_count = 0; /* reset defers per function */
+                cg.defer_count = 0;
                 cg.current_return_type = m->as.fn.ret_type;
                 cg_push_scope(&cg);
                 for (int k = 0; k < m->as.fn.params.count; k++) {
@@ -2844,6 +2985,26 @@ static void emit_definitions(COut *o, Node *prog) {
                 emit(o, "\n");
             }
         }
+
+        if (d->kind == NODE_KERNEL_APP) {
+            for (int j = 0; j < d->as.kernel_app.fns.count; j++) {
+                Node *fn = d->as.kernel_app.fns.items[j];
+                make_c_name(cname, sizeof(cname), NULL, fn->as.fn.name);
+                emit(o, "\n");
+                emit_fn_sig(o, cname, &fn->as.fn.params, fn->as.fn.ret_type);
+                emit(o, "\n");
+                cg.defer_count = 0;
+                cg.current_return_type = fn->as.fn.ret_type;
+                cg_push_scope(&cg);
+                for (int k = 0; k < fn->as.fn.params.count; k++) {
+                    Node *param = fn->as.fn.params.items[k];
+                    cg_define(&cg, param->as.let.name, param->as.let.type);
+                }
+                emit_block(o, &cg, fn->as.fn.body);
+                cg_pop_scope(&cg);
+                emit(o, "\n");
+            }
+        }
     }
     cg_free_temps(&cg);
     free(cg.defers);
@@ -2851,7 +3012,7 @@ static void emit_definitions(COut *o, Node *prog) {
     free(cg.loop_defer_markers.items);
 }
 
-/* ── UI code generation ────────────────────────────────────────────────── */
+/* ── UI code generation (v0.4) ─────────────────────────────────────────── */
 
 static int has_ui_app(Node *prog) {
     for (int i = 0; i < prog->as.program.decls.count; i++)
@@ -2859,6 +3020,8 @@ static int has_ui_app(Node *prog) {
             return 1;
     return 0;
 }
+
+/* ── UI helper accessors ─────────────────────────────────────────────────── */
 
 static long long ui_prop_int(Node *elem, const char *name, long long def) {
     for (int i = 0; i < elem->as.ui_element.properties.count; i++) {
@@ -2872,7 +3035,7 @@ static long long ui_prop_int(Node *elem, const char *name, long long def) {
 }
 
 static const char *ui_elem_text(Node *elem) {
-    if (elem->as.ui_element.text)
+    if (elem->as.ui_element.text && elem->as.ui_element.text[0])
         return elem->as.ui_element.text;
     for (int i = 0; i < elem->as.ui_element.properties.count; i++) {
         Node *p = elem->as.ui_element.properties.items[i];
@@ -2880,23 +3043,112 @@ static const char *ui_elem_text(Node *elem) {
             p->as.ui_property.value->kind == NODE_LIT_STRING &&
             (!strcmp(p->as.ui_property.name, "text") ||
              !strcmp(p->as.ui_property.name, "title") ||
-             !strcmp(p->as.ui_property.name, "label")))
+             !strcmp(p->as.ui_property.name, "label") ||
+             !strcmp(p->as.ui_property.name, "placeholder")))
             return p->as.ui_property.value->as.lit_str.value;
     }
     return "";
 }
 
-/* Emit handler body as a static function */
-static int emit_ui_handlers(COut *o, Node *elem, Node *prog, int *counter) {
+/* ── UIElemInfo: layout record per leaf element ─────────────────────────── */
+
+typedef struct UIElemInfo {
+    int   kind;        /* UIElemKind */
+    int   x, y, w, h;
+    const char *label;
+    int   elem_idx;    /* index in source tree (matches handler name) */
+    int   has_onclick;
+    int   has_onkey;
+    int   has_onchange;
+} UIElemInfo;
+
+/* ── layout pass ─────────────────────────────────────────────────────────── */
+
+static void collect_ui_elems(Node *elem, int *x_cur, int *y_cur, int *idx,
+                              UIElemInfo *elems, int *count, int max) {
+    if (*count >= max) return;
+    int ek = elem->as.ui_element.elem_kind;
+    int is_container = (ek == UI_ELEM_WINDOW || ek == UI_ELEM_ROW  ||
+                        ek == UI_ELEM_COLUMN || ek == UI_ELEM_PANEL ||
+                        ek == UI_ELEM_CANVAS || ek == UI_ELEM_MENU);
+
+    if (!is_container) {
+        /* default dimensions by element type */
+        int def_w = (ek == UI_ELEM_BUTTON) ? 160 :
+                    (ek == UI_ELEM_LABEL)  ? 240 :
+                    (ek == UI_ELEM_INPUT)  ? 260 : 160;
+        int def_h = (ek == UI_ELEM_BUTTON) ? 40  :
+                    (ek == UI_ELEM_LABEL)  ? 24  :
+                    (ek == UI_ELEM_INPUT)  ? 36  : 40;
+
+        UIElemInfo *info = &elems[*count];
+        info->kind       = ek;
+        info->x          = (int)ui_prop_int(elem, "x",      *x_cur);
+        info->y          = (int)ui_prop_int(elem, "y",      *y_cur);
+        info->w          = (int)ui_prop_int(elem, "width",  def_w);
+        info->h          = (int)ui_prop_int(elem, "height", def_h);
+        info->label      = ui_elem_text(elem);
+        info->elem_idx   = *idx;
+        info->has_onclick  = 0;
+        info->has_onkey    = 0;
+        info->has_onchange = 0;
+
+        for (int i = 0; i < elem->as.ui_element.handlers.count; i++) {
+            int hk = elem->as.ui_element.handlers.items[i]->as.ui_handler.handler_kind;
+            if (hk == UI_HANDLER_CLICK)  info->has_onclick  = 1;
+            if (hk == UI_HANDLER_KEY)    info->has_onkey    = 1;
+            if (hk == UI_HANDLER_CHANGE) info->has_onchange = 1;
+        }
+
+        *y_cur += info->h + 10;
+        (*count)++;
+    }
+    (*idx)++;
+
+    if (elem->as.ui_element.children.count > 0) {
+        if (ek == UI_ELEM_ROW) {
+            /* horizontal flow */
+            int child_x   = *x_cur + 8;
+            int row_y     = *y_cur;
+            int row_max_h = 0;
+            for (int i = 0; i < elem->as.ui_element.children.count; i++) {
+                int cy = row_y;
+                collect_ui_elems(elem->as.ui_element.children.items[i],
+                                 &child_x, &cy, idx, elems, count, max);
+                int used_h = cy - row_y;
+                if (used_h > row_max_h) row_max_h = used_h;
+                child_x += 10; /* gap between row children */
+            }
+            *y_cur = row_y + row_max_h;
+        } else {
+            /* vertical flow: window, column, panel, canvas */
+            int pad = (ek == UI_ELEM_PANEL || ek == UI_ELEM_COLUMN) ? 8 : 0;
+            int cx = *x_cur + pad;
+            for (int i = 0; i < elem->as.ui_element.children.count; i++)
+                collect_ui_elems(elem->as.ui_element.children.items[i],
+                                 &cx, y_cur, idx, elems, count, max);
+        }
+    }
+}
+
+/* ── handler emission ────────────────────────────────────────────────────── */
+
+/* Handlers receive context via globals:
+     ns_last_key      — SDL_Keycode of the last keydown
+     ns_focused_idx   — index of the currently focused input element (-1 = none)
+     ns_input_text(i) — macro to get the char* text of input element i       */
+
+static void emit_ui_handlers(COut *o, Node *elem, Node *prog, int *counter) {
     for (int i = 0; i < elem->as.ui_element.handlers.count; i++) {
         CGContext cg;
         memset(&cg, 0, sizeof(cg));
         cg.program = prog;
 
-        Node *h = elem->as.ui_element.handlers.items[i];
-        int hkind = h->as.ui_handler.handler_kind;
-        const char *hname = (hkind == UI_HANDLER_CLICK)  ? "onclick"   :
-                            (hkind == UI_HANDLER_KEY)    ? "onkey"     : "onchange";
+        Node *h    = elem->as.ui_element.handlers.items[i];
+        int   hk   = h->as.ui_handler.handler_kind;
+        const char *hname = (hk == UI_HANDLER_CLICK)  ? "onclick"  :
+                            (hk == UI_HANDLER_KEY)    ? "onkey"    : "onchange";
+
         emit(o, "static void ns_handler_%d_%s(void) ", *counter, hname);
         cg_push_scope(&cg);
         emit_block(o, &cg, h->as.ui_handler.body);
@@ -2912,199 +3164,591 @@ static int emit_ui_handlers(COut *o, Node *elem, Node *prog, int *counter) {
 
     for (int i = 0; i < elem->as.ui_element.children.count; i++)
         emit_ui_handlers(o, elem->as.ui_element.children.items[i], prog, counter);
-    return *counter;
 }
 
-typedef struct UIElemInfo {
-    int   kind;           /* UIElemKind */
-    int   x, y, w, h;
-    const char *text;
-    int   elem_idx;       /* sequential index of this element among all elements */
-    int   has_onclick;
-    int   has_onkey;
-    int   has_onchange;
-} UIElemInfo;
+/* ── std.io runtime ──────────────────────────────────────────────────────── */
 
-static void collect_ui_elems(Node *elem, int *x_cur, int *y_cur, int *idx,
-                              UIElemInfo *elems, int *count, int max) {
-    if (*count >= max) return;
-    int ek = elem->as.ui_element.elem_kind;
-    int is_container = (ek == UI_ELEM_WINDOW || ek == UI_ELEM_ROW ||
-                        ek == UI_ELEM_COLUMN || ek == UI_ELEM_PANEL ||
-                        ek == UI_ELEM_CANVAS || ek == UI_ELEM_MENU);
 
-    if (!is_container) {
-        int def_w = (ek == UI_ELEM_BUTTON) ? 160 :
-                    (ek == UI_ELEM_LABEL)  ? 220 :
-                    (ek == UI_ELEM_INPUT)  ? 200 : 160;
-        int def_h = (ek == UI_ELEM_BUTTON) ? 40  :
-                    (ek == UI_ELEM_LABEL)  ? 28  :
-                    (ek == UI_ELEM_INPUT)  ? 36  : 40;
-
-        UIElemInfo *info = &elems[*count];
-        info->kind     = ek;
-        info->x        = (int)ui_prop_int(elem, "x", *x_cur);
-        info->y        = (int)ui_prop_int(elem, "y", *y_cur);
-        info->w        = (int)ui_prop_int(elem, "width", def_w);
-        info->h        = (int)ui_prop_int(elem, "height", def_h);
-        info->text     = ui_elem_text(elem);
-        info->elem_idx = *idx;
-        info->has_onclick  = 0;
-        info->has_onkey    = 0;
-        info->has_onchange = 0;
-
-        for (int i = 0; i < elem->as.ui_element.handlers.count; i++) {
-            int hk = elem->as.ui_element.handlers.items[i]->as.ui_handler.handler_kind;
-            if (hk == UI_HANDLER_CLICK)  info->has_onclick  = 1;
-            if (hk == UI_HANDLER_KEY)    info->has_onkey    = 1;
-            if (hk == UI_HANDLER_CHANGE) info->has_onchange = 1;
-        }
-
-        *y_cur += info->h + 8;
-        (*count)++;
-    }
-    (*idx)++;
-
-    if (elem->as.ui_element.children.count > 0) {
-        if (ek == UI_ELEM_ROW) {
-            /* horizontal flow: advance x_cur for each child, reset y_cur after */
-            int child_x = *x_cur;
-            int row_y   = *y_cur;
-            int row_max_h = 0;
-            for (int i = 0; i < elem->as.ui_element.children.count; i++) {
-                int cy = row_y;
-                collect_ui_elems(elem->as.ui_element.children.items[i],
-                                 &child_x, &cy, idx, elems, count, max);
-                if ((cy - row_y) > row_max_h) row_max_h = cy - row_y;
-            }
-            *y_cur = row_y + row_max_h;
-        } else {
-            /* vertical flow (default: window, column, panel, and leaf elements) */
-            for (int i = 0; i < elem->as.ui_element.children.count; i++)
-                collect_ui_elems(elem->as.ui_element.children.items[i],
-                                 x_cur, y_cur, idx, elems, count, max);
-        }
-    }
+static void emit_io_runtime(COut *o) {
+    emit(o, "/* ── std.io runtime ──────────────────────────────────────── */\n");
+    emit(o, "static char _ns_io_buf[4096];\n");
+    emit(o, "static inline void      ns_io_print(const char *s)     { fputs(s, stdout); }\n");
+    emit(o, "static inline void      ns_io_println(const char *s)   { fputs(s, stdout); fputc('\\n', stdout); }\n");
+    emit(o, "static inline void      ns_io_eprint(const char *s)    { fputs(s, stderr); }\n");
+    emit(o, "static inline void      ns_io_eprintln(const char *s)  { fputs(s, stderr); fputc('\\n', stderr); }\n");
+    emit(o, "static inline void      ns_io_print_i32(int32_t n)     { printf(\"%%d\",   n); }\n");
+    emit(o, "static inline void      ns_io_print_i64(int64_t n)     { printf(\"%%lld\", (long long)n); }\n");
+    emit(o, "static inline void      ns_io_print_u32(uint32_t n)    { printf(\"%%u\",   n); }\n");
+    emit(o, "static inline void      ns_io_print_u64(uint64_t n)    { printf(\"%%llu\", (unsigned long long)n); }\n");
+    emit(o, "static inline void      ns_io_print_f64(double n)      { printf(\"%%g\",   n); }\n");
+    emit(o, "static inline void      ns_io_print_bool(int b)        { fputs(b ? \"true\" : \"false\", stdout); }\n");
+    emit(o, "static inline void      ns_io_flush(void)              { fflush(stdout); }\n");
+    emit(o, "static inline const char *ns_io_readln(void) {\n");
+    emit(o, "    if (!fgets(_ns_io_buf, (int)sizeof(_ns_io_buf), stdin))\n");
+    emit(o, "        { _ns_io_buf[0] = '\\0'; return _ns_io_buf; }\n");
+    emit(o, "    int _l = 0;\n");
+    emit(o, "    while (_ns_io_buf[_l] && _ns_io_buf[_l] != '\\n' && _ns_io_buf[_l] != '\\r') _l++;\n");
+    emit(o, "    _ns_io_buf[_l] = '\\0';\n");
+    emit(o, "    return _ns_io_buf;\n");
+    emit(o, "}\n");
+    emit(o, "static inline int32_t   ns_io_read_i32(void)  { int32_t  n = 0; scanf(\"%%d\",  &n); return n; }\n");
+    emit(o, "static inline int64_t   ns_io_read_i64(void)  { long long n = 0; scanf(\"%%lld\", &n); return (int64_t)n; }\n");
+    emit(o, "static inline uint32_t  ns_io_read_u32(void)  { uint32_t n = 0; scanf(\"%%u\",  &n); return n; }\n");
+    emit(o, "static inline double    ns_io_read_f64(void)  { double   n = 0; scanf(\"%%lf\", &n); return n; }\n");
+    emit(o, "/* ──────────────────────────────────────────────────────────── */\n\n");
 }
+
+/* ── emit_ui_app: full SDL2 runtime with text + input ───────────────────── */
 
 static void emit_ui_app(COut *o, Node *prog) {
+    /* ── find app and window ── */
     Node *app = NULL;
     for (int i = 0; i < prog->as.program.decls.count; i++) {
         if (prog->as.program.decls.items[i]->kind == NODE_UI_APP) {
-            app = prog->as.program.decls.items[i];
-            break;
+            app = prog->as.program.decls.items[i]; break;
         }
     }
     if (!app) return;
 
-    /* find the window element (first child of app) */
     Node *window = NULL;
     for (int i = 0; i < app->as.ui_app.children.count; i++) {
         Node *ch = app->as.ui_app.children.items[i];
-        if (ch->kind == NODE_UI_ELEMENT && ch->as.ui_element.elem_kind == UI_ELEM_WINDOW) {
-            window = ch;
-            break;
+        if (ch->kind == NODE_UI_ELEMENT &&
+            ch->as.ui_element.elem_kind == UI_ELEM_WINDOW) {
+            window = ch; break;
         }
     }
 
-    const char *title  = app->as.ui_app.name;
+    const char *title = app->as.ui_app.name;
     int win_w = 800, win_h = 600;
     if (window) {
-        title  = ui_elem_text(window)[0] ? ui_elem_text(window) : title;
-        win_w  = (int)ui_prop_int(window, "width",  800);
-        win_h  = (int)ui_prop_int(window, "height", 600);
+        const char *wt = ui_elem_text(window);
+        if (wt && wt[0]) title = wt;
+        win_w = (int)ui_prop_int(window, "width",  800);
+        win_h = (int)ui_prop_int(window, "height", 600);
     }
 
-    emit(o, "\n/* ── NightScript SDL2 UI runtime ──────────────────────── */\n");
+    emit(o, "\n/* ════════════════════════════════════════════════════════\n");
+    emit(o, "   NightScript SDL2 UI Runtime  (v0.4)\n");
+    emit(o, "   Generated by the NightScript compiler — do not edit\n");
+    emit(o, "   ════════════════════════════════════════════════════════ */\n\n");
 
-    /* emit all handler bodies */
-    int handler_counter = 0;
+    /* ── 8x8 embedded bitmap font (public-domain PC BIOS font, ASCII 32-127) ── */
+    emit(o, "/* 8x8 bitmap font: each char = 8 bytes, rows top-to-bottom, MSB=left */\n");
+    emit(o, "static const unsigned char ns_font8x8[96][8] = {\n");
+    /* space (0x20) */ emit(o, "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* ' ' */\n");
+    /* ! */  emit(o, "  {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},\n");
+    /* \" */ emit(o, "  {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    /* # */  emit(o, "  {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00},\n");
+    /* $ */  emit(o, "  {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00},\n");
+    /* % */  emit(o, "  {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00},\n");
+    /* & */  emit(o, "  {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00},\n");
+    /* ' */  emit(o, "  {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00},\n");
+    /* ( */  emit(o, "  {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00},\n");
+    /* ) */  emit(o, "  {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00},\n");
+    /* * */  emit(o, "  {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00},\n");
+    /* + */  emit(o, "  {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00},\n");
+    /* , */  emit(o, "  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06},\n");
+    /* - */  emit(o, "  {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00},\n");
+    /* . */  emit(o, "  {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00},\n");
+    /* / */  emit(o, "  {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00},\n");
+    /* 0 */  emit(o, "  {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00},\n");
+    /* 1 */  emit(o, "  {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00},\n");
+    /* 2 */  emit(o, "  {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00},\n");
+    /* 3 */  emit(o, "  {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00},\n");
+    /* 4 */  emit(o, "  {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00},\n");
+    /* 5 */  emit(o, "  {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00},\n");
+    /* 6 */  emit(o, "  {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00},\n");
+    /* 7 */  emit(o, "  {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00},\n");
+    /* 8 */  emit(o, "  {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00},\n");
+    /* 9 */  emit(o, "  {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00},\n");
+    /* : */  emit(o, "  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00},\n");
+    /* ; */  emit(o, "  {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06},\n");
+    /* < */  emit(o, "  {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00},\n");
+    /* = */  emit(o, "  {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00},\n");
+    /* > */  emit(o, "  {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00},\n");
+    /* ? */  emit(o, "  {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00},\n");
+    /* @ */  emit(o, "  {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00},\n");
+    /* A */  emit(o, "  {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00},\n");
+    /* B */  emit(o, "  {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00},\n");
+    /* C */  emit(o, "  {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00},\n");
+    /* D */  emit(o, "  {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00},\n");
+    /* E */  emit(o, "  {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00},\n");
+    /* F */  emit(o, "  {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00},\n");
+    /* G */  emit(o, "  {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00},\n");
+    /* H */  emit(o, "  {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00},\n");
+    /* I */  emit(o, "  {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    /* J */  emit(o, "  {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00},\n");
+    /* K */  emit(o, "  {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00},\n");
+    /* L */  emit(o, "  {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00},\n");
+    /* M */  emit(o, "  {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00},\n");
+    /* N */  emit(o, "  {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00},\n");
+    /* O */  emit(o, "  {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00},\n");
+    /* P */  emit(o, "  {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00},\n");
+    /* Q */  emit(o, "  {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00},\n");
+    /* R */  emit(o, "  {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00},\n");
+    /* S */  emit(o, "  {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00},\n");
+    /* T */  emit(o, "  {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    /* U */  emit(o, "  {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00},\n");
+    /* V */  emit(o, "  {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00},\n");
+    /* W */  emit(o, "  {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00},\n");
+    /* X */  emit(o, "  {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00},\n");
+    /* Y */  emit(o, "  {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00},\n");
+    /* Z */  emit(o, "  {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00},\n");
+    /* [ */  emit(o, "  {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00},\n");
+    /* \\ */ emit(o, "  {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00},\n");
+    /* ] */  emit(o, "  {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00},\n");
+    /* ^ */  emit(o, "  {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00},\n");
+    /* _ */  emit(o, "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF},\n");
+    /* ` */  emit(o, "  {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00},\n");
+    /* a */  emit(o, "  {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00},\n");
+    /* b */  emit(o, "  {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00},\n");
+    /* c */  emit(o, "  {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00},\n");
+    /* d */  emit(o, "  {0x38,0x30,0x30,0x3E,0x33,0x33,0x6E,0x00},\n");
+    /* e */  emit(o, "  {0x00,0x00,0x1E,0x33,0x3F,0x03,0x1E,0x00},\n");
+    /* f */  emit(o, "  {0x1C,0x36,0x06,0x0F,0x06,0x06,0x0F,0x00},\n");
+    /* g */  emit(o, "  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F},\n");
+    /* h */  emit(o, "  {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00},\n");
+    /* i */  emit(o, "  {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    /* j */  emit(o, "  {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E},\n");
+    /* k */  emit(o, "  {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00},\n");
+    /* l */  emit(o, "  {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},\n");
+    /* m */  emit(o, "  {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00},\n");
+    /* n */  emit(o, "  {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00},\n");
+    /* o */  emit(o, "  {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00},\n");
+    /* p */  emit(o, "  {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F},\n");
+    /* q */  emit(o, "  {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78},\n");
+    /* r */  emit(o, "  {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00},\n");
+    /* s */  emit(o, "  {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00},\n");
+    /* t */  emit(o, "  {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00},\n");
+    /* u */  emit(o, "  {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00},\n");
+    /* v */  emit(o, "  {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00},\n");
+    /* w */  emit(o, "  {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00},\n");
+    /* x */  emit(o, "  {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00},\n");
+    /* y */  emit(o, "  {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F},\n");
+    /* z */  emit(o, "  {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00},\n");
+    /* { */  emit(o, "  {0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00},\n");
+    /* | */  emit(o, "  {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00},\n");
+    /* } */  emit(o, "  {0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00},\n");
+    /* ~ */  emit(o, "  {0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    /* del */ emit(o, "  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},\n");
+    emit(o, "};\n\n");
+
+    /* ── text rendering via pixel font ── */
+    emit(o, "static void ns_draw_char(SDL_Renderer *r, int x, int y,\n");
+    emit(o, "                         char c, Uint8 R, Uint8 G, Uint8 B) {\n");
+    emit(o, "    if (c < 32 || c > 127) return;\n");
+    emit(o, "    const unsigned char *glyph = ns_font8x8[(unsigned char)c - 32];\n");
+    emit(o, "    SDL_SetRenderDrawColor(r, R, G, B, 255);\n");
+    emit(o, "    for (int row = 0; row < 8; row++) {\n");
+    emit(o, "        unsigned char bits = glyph[row];\n");
+    emit(o, "        for (int col = 0; col < 8; col++) {\n");
+    emit(o, "            if (bits & (0x80 >> col))\n");
+    emit(o, "                SDL_RenderDrawPoint(r, x + col, y + row);\n");
+    emit(o, "        }\n");
+    emit(o, "    }\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static void ns_draw_text(SDL_Renderer *r, int x, int y,\n");
+    emit(o, "                          const char *s, Uint8 R, Uint8 G, Uint8 B) {\n");
+    emit(o, "    for (; *s; s++, x += 9)\n");
+    emit(o, "        ns_draw_char(r, x, y, *s, R, G, B);\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static int ns_text_width(const char *s) {\n");
+    emit(o, "    int n = 0; while (*s++) n++; return n * 9;\n");
+    emit(o, "}\n\n");
+
+    /* ── element types ── */
+    emit(o, "#define NS_ELEM_LABEL  0\n");
+    emit(o, "#define NS_ELEM_BUTTON 1\n");
+    emit(o, "#define NS_ELEM_INPUT  2\n");
+    emit(o, "#define NS_ELEM_OTHER  3\n\n");
+
+    /* ── NSUIElem struct ── */
+    emit(o, "typedef struct NSUIElem {\n");
+    emit(o, "    int         kind;               /* NS_ELEM_* */\n");
+    emit(o, "    int         x, y, w, h;\n");
+    emit(o, "    const char *label;              /* static label or placeholder */\n");
+    emit(o, "    char        input_buf[512];     /* editable text (input only) */\n");
+    emit(o, "    int         input_len;          /* current text length */\n");
+    emit(o, "    int         cursor;             /* caret position */\n");
+    emit(o, "    int         focused;            /* 1 = keyboard focus */\n");
+    emit(o, "    int         hovered;            /* 1 = mouse is over */\n");
+    emit(o, "    void      (*on_click)(void);\n");
+    emit(o, "    void      (*on_key)(void);      /* called with ns_last_key set */\n");
+    emit(o, "    void      (*on_change)(void);   /* called with ns_changed_idx set */\n");
+    emit(o, "} NSUIElem;\n\n");
+
+    /* ── global state ── */
+    emit(o, "static int          ns_focused_idx  = -1; /* index of focused element */\n");
+    emit(o, "static int          ns_hovered_idx  = -1; /* index of hovered element */\n");
+    emit(o, "static int          ns_last_key     =  0; /* SDL_Keycode of last keydown */\n");
+    emit(o, "static int          ns_changed_idx  = -1; /* index of changed input */\n\n");
+
+    /* ── accessor macros for user handlers ── */
+    emit(o, "/* Accessible from onKey{} and onChange{} handler bodies */\n");
+    emit(o, "#define ns_input_text(i)    (ns_ui_elems[i].input_buf)\n");
+    emit(o, "#define ns_input_len(i)     (ns_ui_elems[i].input_len)\n");
+    emit(o, "#define ns_key()            ((int)ns_last_key)\n");
+    emit(o, "#define ns_changed_text()   (ns_ui_elems[ns_changed_idx].input_buf)\n\n");
+
+    /* ── emit all handler functions ── */
+    int hctr = 0;
     if (window)
-        emit_ui_handlers(o, window, prog, &handler_counter);
+        emit_ui_handlers(o, window, prog, &hctr);
 
-    /* collect element info */
+    /* ── collect all leaf elements ── */
     UIElemInfo elems[256];
     int elem_count = 0;
-    int x_cur = 10, y_cur = 10, idx = 0;
+    int x_cur = 16, y_cur = 16, idx = 0;
     if (window)
         collect_ui_elems(window, &x_cur, &y_cur, &idx, elems, &elem_count, 256);
 
-    /* emit element table */
-    emit(o, "\ntypedef struct { int x,y,w,h; const char *label; "
-         "void(*on_click)(void); void(*on_key)(void); } NSUIElem;\n");
-
+    /* ── element table ── */
     emit(o, "static NSUIElem ns_ui_elems[] = {\n");
     for (int i = 0; i < elem_count; i++) {
         UIElemInfo *e = &elems[i];
-        const char *onclick_fn  = e->has_onclick  ? "NULL" : "NULL";
-        const char *onkey_fn    = e->has_onkey    ? "NULL" : "NULL";
 
-        /* rebuild handler name: idx × handlers + offset */
-        char onclick_buf[64] = "NULL";
-        char onkey_buf[64]   = "NULL";
+        int kind_c = (e->kind == UI_ELEM_BUTTON) ? 1 :
+                     (e->kind == UI_ELEM_LABEL)  ? 0 :
+                     (e->kind == UI_ELEM_INPUT)  ? 2 : 3;
+
+        char onclick_buf[80]   = "NULL";
+        char onkey_buf[80]     = "NULL";
+        char onchange_buf[80]  = "NULL";
         if (e->has_onclick)
-            snprintf(onclick_buf, sizeof(onclick_buf), "ns_handler_%d_onclick", e->elem_idx);
+            snprintf(onclick_buf,  sizeof(onclick_buf),  "ns_handler_%d_onclick",  e->elem_idx);
         if (e->has_onkey)
-            snprintf(onkey_buf, sizeof(onkey_buf), "ns_handler_%d_onkey", e->elem_idx);
-        (void)onclick_fn; (void)onkey_fn;
+            snprintf(onkey_buf,    sizeof(onkey_buf),    "ns_handler_%d_onkey",    e->elem_idx);
+        if (e->has_onchange)
+            snprintf(onchange_buf, sizeof(onchange_buf), "ns_handler_%d_onchange", e->elem_idx);
 
-        emit(o, "    { %d, %d, %d, %d, \"%s\", %s, %s },\n",
-             e->x, e->y, e->w, e->h, e->text, onclick_buf, onkey_buf);
+        /* escape label for C string */
+        char esc_label[256];
+        const char *src = e->label ? e->label : "";
+        int oi = 0;
+        while (*src && oi < 250) {
+            if (*src == '"' || *src == '\\') esc_label[oi++] = '\\';
+            esc_label[oi++] = *src++;
+        }
+        esc_label[oi] = '\0';
+
+        emit(o, "    { %d, %d,%d,%d,%d, \"%s\", {0}, 0, 0, 0, 0,\n",
+             kind_c, e->x, e->y, e->w, e->h, esc_label);
+        emit(o, "      %s, %s, %s },\n", onclick_buf, onkey_buf, onchange_buf);
     }
     emit(o, "};\n");
-    emit(o, "#define NS_UI_ELEM_COUNT ((int)(sizeof(ns_ui_elems)/sizeof(ns_ui_elems[0])))\n\n");
+    emit(o, "#define NS_ELEM_COUNT ((int)(sizeof(ns_ui_elems)/sizeof(ns_ui_elems[0])))\n\n");
 
-    /* emit main() */
+    /* ── rendering helpers ── */
+    emit(o, "static void ns_render_label(SDL_Renderer *r, NSUIElem *e) {\n");
+    emit(o, "    /* draw text centred vertically in the element bounds */\n");
+    emit(o, "    int ty = e->y + (e->h - 8) / 2;\n");
+    emit(o, "    ns_draw_text(r, e->x + 4, ty, e->label, 220, 220, 220);\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static void ns_render_button(SDL_Renderer *r, NSUIElem *e) {\n");
+    emit(o, "    /* background */\n");
+    emit(o, "    Uint8 br = e->hovered ? 100 : 70;\n");
+    emit(o, "    Uint8 bg = e->hovered ? 140 : 100;\n");
+    emit(o, "    Uint8 bb = e->hovered ? 255 : 220;\n");
+    emit(o, "    SDL_Rect rb = { e->x, e->y, e->w, e->h };\n");
+    emit(o, "    SDL_SetRenderDrawColor(r, br, bg, bb, 255);\n");
+    emit(o, "    SDL_RenderFillRect(r, &rb);\n");
+    emit(o, "    /* border */\n");
+    emit(o, "    SDL_SetRenderDrawColor(r, 40, 60, 160, 255);\n");
+    emit(o, "    SDL_RenderDrawRect(r, &rb);\n");
+    emit(o, "    /* label: white text, centred */\n");
+    emit(o, "    int tw = ns_text_width(e->label);\n");
+    emit(o, "    int tx = e->x + (e->w - tw) / 2;\n");
+    emit(o, "    int ty = e->y + (e->h - 8) / 2;\n");
+    emit(o, "    ns_draw_text(r, tx, ty, e->label, 255, 255, 255);\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static void ns_render_input(SDL_Renderer *r, NSUIElem *e) {\n");
+    emit(o, "    /* background */\n");
+    emit(o, "    Uint8 abr = e->focused ? 28 : 22;\n");
+    emit(o, "    SDL_Rect rb = { e->x, e->y, e->w, e->h };\n");
+    emit(o, "    SDL_SetRenderDrawColor(r, abr, abr, abr + 12, 255);\n");
+    emit(o, "    SDL_RenderFillRect(r, &rb);\n");
+    emit(o, "    /* border: brighter when focused */\n");
+    emit(o, "    if (e->focused)\n");
+    emit(o, "        SDL_SetRenderDrawColor(r, 100, 140, 255, 255);\n");
+    emit(o, "    else\n");
+    emit(o, "        SDL_SetRenderDrawColor(r, 80, 80, 100, 255);\n");
+    emit(o, "    SDL_RenderDrawRect(r, &rb);\n");
+    emit(o, "    /* placeholder or typed text */\n");
+    emit(o, "    int tx = e->x + 6;\n");
+    emit(o, "    int ty = e->y + (e->h - 8) / 2;\n");
+    emit(o, "    if (e->input_len > 0) {\n");
+    emit(o, "        ns_draw_text(r, tx, ty, e->input_buf, 230, 230, 230);\n");
+    emit(o, "    } else if (e->label && e->label[0]) {\n");
+    emit(o, "        ns_draw_text(r, tx, ty, e->label, 100, 100, 120);\n");
+    emit(o, "    }\n");
+    emit(o, "    /* blinking cursor when focused */\n");
+    emit(o, "    if (e->focused && (SDL_GetTicks() / 500) %% 2 == 0) {\n");
+    emit(o, "        int cx = tx + e->cursor * 9;\n");
+    emit(o, "        SDL_SetRenderDrawColor(r, 200, 200, 255, 255);\n");
+    emit(o, "        SDL_RenderDrawLine(r, cx, ty, cx, ty + 8);\n");
+    emit(o, "    }\n");
+    emit(o, "}\n\n");
+
+    /* ── input text editing helpers ── */
+    emit(o, "static void ns_input_insert(NSUIElem *e, const char *text) {\n");
+    emit(o, "    for (const char *p = text; *p; p++) {\n");
+    emit(o, "        if (e->input_len >= 511) break;\n");
+    emit(o, "        /* shift right from cursor */\n");
+    emit(o, "        for (int i = e->input_len; i > e->cursor; i--)\n");
+    emit(o, "            e->input_buf[i] = e->input_buf[i-1];\n");
+    emit(o, "        e->input_buf[e->cursor] = *p;\n");
+    emit(o, "        e->cursor++;\n");
+    emit(o, "        e->input_len++;\n");
+    emit(o, "        e->input_buf[e->input_len] = '\\0';\n");
+    emit(o, "    }\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static void ns_input_backspace(NSUIElem *e) {\n");
+    emit(o, "    if (e->cursor <= 0 || e->input_len <= 0) return;\n");
+    emit(o, "    for (int i = e->cursor - 1; i < e->input_len - 1; i++)\n");
+    emit(o, "        e->input_buf[i] = e->input_buf[i+1];\n");
+    emit(o, "    e->cursor--;\n");
+    emit(o, "    e->input_len--;\n");
+    emit(o, "    e->input_buf[e->input_len] = '\\0';\n");
+    emit(o, "}\n\n");
+
+    emit(o, "static void ns_input_delete(NSUIElem *e) {\n");
+    emit(o, "    if (e->cursor >= e->input_len) return;\n");
+    emit(o, "    for (int i = e->cursor; i < e->input_len - 1; i++)\n");
+    emit(o, "        e->input_buf[i] = e->input_buf[i+1];\n");
+    emit(o, "    e->input_len--;\n");
+    emit(o, "    e->input_buf[e->input_len] = '\\0';\n");
+    emit(o, "}\n\n");
+
+    /* ── focus management ── */
+    emit(o, "static void ns_set_focus(int new_idx) {\n");
+    emit(o, "    if (ns_focused_idx >= 0 && ns_focused_idx < NS_ELEM_COUNT)\n");
+    emit(o, "        ns_ui_elems[ns_focused_idx].focused = 0;\n");
+    emit(o, "    ns_focused_idx = new_idx;\n");
+    emit(o, "    if (new_idx >= 0 && new_idx < NS_ELEM_COUNT)\n");
+    emit(o, "        ns_ui_elems[new_idx].focused = 1;\n");
+    emit(o, "}\n\n");
+
+    /* ── main() ── */
     emit(o, "int main(void) {\n");
     emit(o, "    if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;\n");
     emit(o, "    SDL_Window *ns_win = SDL_CreateWindow(\"%s\",\n", title);
     emit(o, "        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,\n");
     emit(o, "        %d, %d, SDL_WINDOW_SHOWN);\n", win_w, win_h);
     emit(o, "    if (!ns_win) { SDL_Quit(); return 1; }\n");
-    emit(o, "    SDL_Renderer *ns_rend = SDL_CreateRenderer(ns_win, -1,\n");
-    emit(o, "        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);\n");
+    emit(o, "    SDL_Renderer *ns_rend = SDL_CreateRenderer(\n");
+    emit(o, "        ns_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);\n");
     emit(o, "    if (!ns_rend) { SDL_DestroyWindow(ns_win); SDL_Quit(); return 1; }\n");
-    emit(o, "\n");
+    emit(o, "    SDL_StartTextInput();\n\n");
+
     emit(o, "    int ns_running = 1;\n");
     emit(o, "    while (ns_running) {\n");
+
+    /* event loop */
     emit(o, "        SDL_Event ns_ev;\n");
     emit(o, "        while (SDL_PollEvent(&ns_ev)) {\n");
-    emit(o, "            if (ns_ev.type == SDL_QUIT) ns_running = 0;\n");
-    emit(o, "            if (ns_ev.type == SDL_MOUSEBUTTONDOWN &&\n");
-    emit(o, "                ns_ev.button.button == SDL_BUTTON_LEFT) {\n");
-    emit(o, "                int mx = ns_ev.button.x, my = ns_ev.button.y;\n");
-    emit(o, "                for (int i = 0; i < NS_UI_ELEM_COUNT; i++) {\n");
+    emit(o, "            switch (ns_ev.type) {\n");
+
+    /* quit */
+    emit(o, "            case SDL_QUIT:\n");
+    emit(o, "                ns_running = 0;\n");
+    emit(o, "                break;\n");
+
+    /* mouse motion: hover detection */
+    emit(o, "            case SDL_MOUSEMOTION: {\n");
+    emit(o, "                int mx = ns_ev.motion.x, my = ns_ev.motion.y;\n");
+    emit(o, "                ns_hovered_idx = -1;\n");
+    emit(o, "                for (int i = 0; i < NS_ELEM_COUNT; i++) {\n");
     emit(o, "                    NSUIElem *e = &ns_ui_elems[i];\n");
+    emit(o, "                    e->hovered = 0;\n");
     emit(o, "                    if (mx >= e->x && mx < e->x+e->w &&\n");
-    emit(o, "                        my >= e->y && my < e->y+e->h && e->on_click)\n");
-    emit(o, "                        e->on_click();\n");
+    emit(o, "                        my >= e->y && my < e->y+e->h) {\n");
+    emit(o, "                        e->hovered = 1;\n");
+    emit(o, "                        ns_hovered_idx = i;\n");
+    emit(o, "                    }\n");
     emit(o, "                }\n");
+    emit(o, "                break;\n");
     emit(o, "            }\n");
-    emit(o, "            if (ns_ev.type == SDL_KEYDOWN) {\n");
-    emit(o, "                for (int i = 0; i < NS_UI_ELEM_COUNT; i++)\n");
-    emit(o, "                    if (ns_ui_elems[i].on_key) ns_ui_elems[i].on_key();\n");
+
+    /* mouse button down: click + focus */
+    emit(o, "            case SDL_MOUSEBUTTONDOWN:\n");
+    emit(o, "                if (ns_ev.button.button == SDL_BUTTON_LEFT) {\n");
+    emit(o, "                    int mx = ns_ev.button.x, my = ns_ev.button.y;\n");
+    emit(o, "                    int hit = -1;\n");
+    emit(o, "                    for (int i = 0; i < NS_ELEM_COUNT; i++) {\n");
+    emit(o, "                        NSUIElem *e = &ns_ui_elems[i];\n");
+    emit(o, "                        if (mx >= e->x && mx < e->x+e->w &&\n");
+    emit(o, "                            my >= e->y && my < e->y+e->h) {\n");
+    emit(o, "                            hit = i;\n");
+    emit(o, "                            if (e->kind == NS_ELEM_INPUT)\n");
+    emit(o, "                                ns_set_focus(i);\n");
+    emit(o, "                            if (e->on_click)\n");
+    emit(o, "                                e->on_click();\n");
+    emit(o, "                        }\n");
+    emit(o, "                    }\n");
+    emit(o, "                    /* click outside input clears focus */\n");
+    emit(o, "                    if (hit < 0 || ns_ui_elems[hit].kind != NS_ELEM_INPUT)\n");
+    emit(o, "                        ns_set_focus(-1);\n");
+    emit(o, "                }\n");
+    emit(o, "                break;\n");
+
+    /* SDL_TEXTINPUT: printable text into focused input */
+    emit(o, "            case SDL_TEXTINPUT:\n");
+    emit(o, "                if (ns_focused_idx >= 0) {\n");
+    emit(o, "                    NSUIElem *fe = &ns_ui_elems[ns_focused_idx];\n");
+    emit(o, "                    ns_input_insert(fe, ns_ev.text.text);\n");
+    emit(o, "                    ns_changed_idx = ns_focused_idx;\n");
+    emit(o, "                    if (fe->on_change) fe->on_change();\n");
+    emit(o, "                }\n");
+    emit(o, "                break;\n");
+
+    /* SDL_KEYDOWN: backspace/delete/arrows + onKey dispatch */
+    emit(o, "            case SDL_KEYDOWN: {\n");
+    emit(o, "                SDL_Keycode kc = ns_ev.key.keysym.sym;\n");
+    emit(o, "                ns_last_key = (int)kc;\n");
+    emit(o, "                if (ns_focused_idx >= 0) {\n");
+    emit(o, "                    NSUIElem *fe = &ns_ui_elems[ns_focused_idx];\n");
+    emit(o, "                    if (kc == SDLK_BACKSPACE) {\n");
+    emit(o, "                        ns_input_backspace(fe);\n");
+    emit(o, "                        ns_changed_idx = ns_focused_idx;\n");
+    emit(o, "                        if (fe->on_change) fe->on_change();\n");
+    emit(o, "                    } else if (kc == SDLK_DELETE) {\n");
+    emit(o, "                        ns_input_delete(fe);\n");
+    emit(o, "                        ns_changed_idx = ns_focused_idx;\n");
+    emit(o, "                        if (fe->on_change) fe->on_change();\n");
+    emit(o, "                    } else if (kc == SDLK_LEFT && fe->cursor > 0) {\n");
+    emit(o, "                        fe->cursor--;\n");
+    emit(o, "                    } else if (kc == SDLK_RIGHT && fe->cursor < fe->input_len) {\n");
+    emit(o, "                        fe->cursor++;\n");
+    emit(o, "                    } else if (kc == SDLK_HOME) {\n");
+    emit(o, "                        fe->cursor = 0;\n");
+    emit(o, "                    } else if (kc == SDLK_END) {\n");
+    emit(o, "                        fe->cursor = fe->input_len;\n");
+    emit(o, "                    }\n");
+    emit(o, "                    /* fire onKey for focused input */\n");
+    emit(o, "                    if (fe->on_key) fe->on_key();\n");
+    emit(o, "                } else {\n");
+    emit(o, "                    /* no focus: fire onKey on any element that has it */\n");
+    emit(o, "                    for (int i = 0; i < NS_ELEM_COUNT; i++)\n");
+    emit(o, "                        if (ns_ui_elems[i].on_key) ns_ui_elems[i].on_key();\n");
+    emit(o, "                }\n");
+    emit(o, "                break;\n");
     emit(o, "            }\n");
-    emit(o, "        }\n");
-    emit(o, "        SDL_SetRenderDrawColor(ns_rend, 30, 30, 30, 255);\n");
-    emit(o, "        SDL_RenderClear(ns_rend);\n");
-    emit(o, "        for (int i = 0; i < NS_UI_ELEM_COUNT; i++) {\n");
+
+    /* tab: cycle focus between input elements */
+    emit(o, "            default: break;\n");
+    emit(o, "            } /* switch */\n");
+    emit(o, "        } /* PollEvent */\n\n");
+
+    /* render */
+    emit(o, "        /* ── render ── */\n");
+    emit(o, "        SDL_SetRenderDrawColor(ns_rend, 22, 22, 28, 255);\n");
+    emit(o, "        SDL_RenderClear(ns_rend);\n\n");
+    emit(o, "        for (int i = 0; i < NS_ELEM_COUNT; i++) {\n");
     emit(o, "            NSUIElem *e = &ns_ui_elems[i];\n");
-    emit(o, "            SDL_Rect r = { e->x, e->y, e->w, e->h };\n");
-    emit(o, "            if (e->on_click)\n");
-    emit(o, "                SDL_SetRenderDrawColor(ns_rend, 70, 100, 220, 255);\n");
-    emit(o, "            else\n");
-    emit(o, "                SDL_SetRenderDrawColor(ns_rend, 180, 180, 180, 255);\n");
-    emit(o, "            SDL_RenderFillRect(ns_rend, &r);\n");
-    emit(o, "            SDL_SetRenderDrawColor(ns_rend, 50, 50, 50, 255);\n");
-    emit(o, "            SDL_RenderDrawRect(ns_rend, &r);\n");
-    emit(o, "        }\n");
+    emit(o, "            switch (e->kind) {\n");
+    emit(o, "            case NS_ELEM_LABEL:  ns_render_label(ns_rend, e);  break;\n");
+    emit(o, "            case NS_ELEM_BUTTON: ns_render_button(ns_rend, e); break;\n");
+    emit(o, "            case NS_ELEM_INPUT:  ns_render_input(ns_rend, e);  break;\n");
+    emit(o, "            default: break;\n");
+    emit(o, "            }\n");
+    emit(o, "        }\n\n");
     emit(o, "        SDL_RenderPresent(ns_rend);\n");
     emit(o, "        SDL_Delay(16);\n");
-    emit(o, "    }\n");
+    emit(o, "    } /* main loop */\n\n");
+    emit(o, "    SDL_StopTextInput();\n");
     emit(o, "    SDL_DestroyRenderer(ns_rend);\n");
     emit(o, "    SDL_DestroyWindow(ns_win);\n");
     emit(o, "    SDL_Quit();\n");
     emit(o, "    return 0;\n");
+    emit(o, "}\n");
+}
+
+/* ── kernel app code generation (v0.5) ─────────────────────────────────── */
+
+static int has_kernel_app(Node *prog) {
+    for (int i = 0; i < prog->as.program.decls.count; i++)
+        if (prog->as.program.decls.items[i]->kind == NODE_KERNEL_APP)
+            return 1;
+    return 0;
+}
+
+static void emit_kernel_app(COut *o, Node *prog) {
+    Node *app = NULL;
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        if (prog->as.program.decls.items[i]->kind == NODE_KERNEL_APP) {
+            app = prog->as.program.decls.items[i];
+            break;
+        }
+    }
+    if (!app) return;
+
+    emit(o, "\n/* ── NightScript Kernel Runtime (v0.5) ────────────────── */\n");
+    emit(o, "/* Multiboot2 header */\n");
+    emit(o, "#define NS_MB2_MAGIC    0xe85250d6u\n");
+    emit(o, "#define NS_MB2_ARCH_X86 0u\n");
+    emit(o, "__attribute__((section(\".multiboot2\"), used))\n");
+    emit(o, "static unsigned int ns_mb2_header[] = {\n");
+    emit(o, "    NS_MB2_MAGIC, NS_MB2_ARCH_X86,\n");
+    emit(o, "    24u,   /* header length */\n");
+    emit(o, "    (unsigned int)(-(NS_MB2_MAGIC + NS_MB2_ARCH_X86 + 24u)),\n");
+    emit(o, "    0u, 0u, 8u  /* end tag */\n");
+    emit(o, "};\n\n");
+
+    emit(o, "/* VGA text-mode helpers */\n");
+    emit(o, "#define NS_VGA_BASE ((volatile unsigned short *)0xB8000)\n");
+    emit(o, "static int ns_vga_row = 0, ns_vga_col = 0;\n");
+    emit(o, "static void ns_vga_clear(void) {\n");
+    emit(o, "    for (int i = 0; i < 80*25; i++)\n");
+    emit(o, "        NS_VGA_BASE[i] = (unsigned short)(0x0F00 | ' ');\n");
+    emit(o, "    ns_vga_row = ns_vga_col = 0;\n");
+    emit(o, "}\n");
+    emit(o, "static void ns_vga_putchar(char c) {\n");
+    emit(o, "    if (c == '\\n') { ns_vga_col = 0; ns_vga_row++; return; }\n");
+    emit(o, "    if (ns_vga_col >= 80) { ns_vga_col = 0; ns_vga_row++; }\n");
+    emit(o, "    if (ns_vga_row >= 25) ns_vga_row = 0;\n");
+    emit(o, "    NS_VGA_BASE[ns_vga_row * 80 + ns_vga_col] =\n");
+    emit(o, "        (unsigned short)(0x0F00 | (unsigned char)c);\n");
+    emit(o, "    ns_vga_col++;\n");
+    emit(o, "}\n");
+    emit(o, "static void ns_vga_print(const char *s) {\n");
+    emit(o, "    while (*s) ns_vga_putchar(*s++);\n");
+    emit(o, "}\n\n");
+
+    emit(o, "/* Serial port (COM1 0x3F8) helpers */\n");
+    emit(o, "#define NS_SERIAL_PORT 0x3F8\n");
+    emit(o, "static void ns_outb(unsigned short port, unsigned char val) {\n");
+    emit(o, "    __asm__ volatile(\"outb %%al, %%dx\" : : \"a\"(val), \"d\"(port));\n");
+    emit(o, "}\n");
+    emit(o, "static void ns_serial_init(void) {\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 1, 0x00);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 3, 0x80);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 0, 0x03);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 1, 0x00);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 3, 0x03);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 2, 0xC7);\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT + 4, 0x0B);\n");
+    emit(o, "}\n");
+    emit(o, "static void ns_serial_putchar(char c) {\n");
+    emit(o, "    ns_outb(NS_SERIAL_PORT, (unsigned char)c);\n");
+    emit(o, "}\n");
+    emit(o, "static void ns_serial_print(const char *s) {\n");
+    emit(o, "    while (*s) ns_serial_putchar(*s++);\n");
+    emit(o, "}\n\n");
+
+    emit(o, "/* Kernel entry point — called by bootloader */\n");
+    emit(o, "__attribute__((noreturn))\n");
+    emit(o, "void kernel_main(void) {\n");
+    emit(o, "    ns_vga_clear();\n");
+    emit(o, "    ns_serial_init();\n");
+    emit(o, "    main();\n");
+    emit(o, "    for (;;) __asm__ volatile(\"hlt\");\n");
+    emit(o, "    __builtin_unreachable();\n");
     emit(o, "}\n");
 }
 
@@ -3117,14 +3761,22 @@ int codegen_generate(Node *program, COut *out) {
     out->indent = 0;
     out->buf[0] = '\0';
 
-    emit_standard_headers(out, program);
+    int is_kernel = has_kernel_app(program);
+    if (!is_kernel)
+        emit_standard_headers(out, program);
+    else
+        emit(out, "/* NightScript Kernel — freestanding (no libc) */\n\n");
     if (has_ui_app(program))
         emit(out, "#include <SDL2/SDL.h>\n\n");
     emit_type_definitions(out, program);
+    if (!is_kernel)
+        emit_io_runtime(out);
     emit_prototypes(out, program);
     emit_definitions(out, program);
     if (has_ui_app(program))
         emit_ui_app(out, program);
+    if (is_kernel)
+        emit_kernel_app(out, program);
 
     return 1;
 }

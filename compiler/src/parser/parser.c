@@ -924,6 +924,22 @@ static Node *parse_decl(Parser *p) {
     Token *t      = cur(p);
     int is_public = match(p, TOK_PUB);
 
+    /* top-level const declaration: const NAME: type = expr; */
+    if (match(p, TOK_CONST)) {
+        Token *name = expect(p, TOK_IDENT, "expected name after 'const'");
+        Node *type  = NULL;
+        if (match(p, TOK_COLON))
+            type = parse_type(p);
+        expect(p, TOK_EQ, "expected '=' after const name");
+        Node *value = parse_expr(p);
+        expect(p, TOK_SEMICOLON, "expected ';' after const value");
+        Node *n = node_new(p, NODE_CONST, t->line, t->col);
+        n->as.konst.name  = intern(p, name);
+        n->as.konst.type  = type;
+        n->as.konst.value = value;
+        return n;
+    }
+
     if (match(p, TOK_IMPL)) {
         Token *target = expect(p, TOK_IDENT, "expected type name after impl");
         char *iface_name = NULL;
@@ -1140,6 +1156,32 @@ static Node *parse_decl(Parser *p) {
         n->as.ui_app.package_name = p->current_package;
         n->as.ui_app.children     = children;
         n->as.ui_app.is_public    = is_public;
+        return n;
+    }
+
+    if (match(p, TOK_KERNEL)) {
+        expect(p, TOK_APP, "expected 'app' after 'kernel'");
+        Token *name = expect(p, TOK_IDENT, "expected app name after 'kernel app'");
+        expect(p, TOK_LBRACE, "expected '{' after kernel app name");
+        NodeList fns = {0};
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            int pub = match(p, TOK_PUB);
+            if (check(p, TOK_FN)) {
+                p->pos++;
+                nodelist_push(p, &fns, parse_fn_decl(p, pub, NULL));
+            } else {
+                fprintf(stderr, "%s:%d:%d: error: expected 'fn' inside kernel app\n",
+                        p->src_name, cur(p)->line, cur(p)->col);
+                p->had_error = 1;
+                p->pos++;
+            }
+        }
+        expect(p, TOK_RBRACE, "expected '}' after kernel app body");
+        Node *n = node_new(p, NODE_KERNEL_APP, t->line, t->col);
+        n->as.kernel_app.name         = intern(p, name);
+        n->as.kernel_app.package_name = p->current_package;
+        n->as.kernel_app.fns          = fns;
+        n->as.kernel_app.is_public    = is_public;
         return n;
     }
 

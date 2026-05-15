@@ -61,6 +61,9 @@ typedef enum {
     NODE_UI_ELEMENT,
     NODE_UI_HANDLER,
     NODE_UI_PROPERTY,
+
+    /* Kernel declarations (v0.5) */
+    NODE_KERNEL_APP,
 } NodeKind;
 
 /* ── forward declaration ───────────────────────────────────────────────── */
@@ -339,6 +342,14 @@ struct Node {
             char *name;
             Node *value; /* expression */
         } ui_property;
+
+        /* NODE_KERNEL_APP */
+        struct {
+            char    *name;
+            char    *package_name;
+            NodeList fns;        /* NODE_FN_DECL items */
+            int      is_public;
+        } kernel_app;
 
     } as;
 };

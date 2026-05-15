@@ -69,6 +69,7 @@ struct Scope {
 typedef struct {
     const char *source_name;
     const SemanticModel *sema;
+    Node *program;               /* root program node — for global const lookup */
     Type *current_return_type;
     const char *current_package;
     int had_error;
@@ -1281,6 +1282,7 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
         case NODE_IDENT: {
             Binding *binding = scope_resolve(scope, expr->as.ident.name);
             Node *fn;
+            const char *iname = expr->as.ident.name;
 
             if (binding) {
                 if (!ensure_resolved_type_visible(c, binding->type, expr->line, expr->col))
@@ -1288,21 +1290,40 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 return binding->type;
             }
 
-            if (!strcmp(expr->as.ident.name, "None")) {
+            if (!strcmp(iname, "None")) {
                 typeck_error(c, expr->line, expr->col,
                              "cannot infer Option type for None without context");
                 return &TYPE_ERROR_VALUE;
             }
 
+            /* built-in I/O stream objects */
+            if (!strcmp(iname, "stdout") || !strcmp(iname, "stderr"))
+                return &TYPE_VOID_VALUE;   /* stream handle — used only for .flush()/.write() */
+            if (!strcmp(iname, "stdin"))
+                return &TYPE_VOID_VALUE;
+
             fn = find_named_node(c->sema->functions, c->sema->function_count,
-                                 expr->as.ident.name, NODE_FN_DECL);
+                                 iname, NODE_FN_DECL);
             if (!fn)
                 fn = find_named_node(c->sema->extern_functions, c->sema->extern_function_count,
-                                     expr->as.ident.name, NODE_EXTERN_FN);
+                                     iname, NODE_EXTERN_FN);
             if (fn) {
-                if (!require_decl_visible(c, fn, expr->line, expr->col, expr->as.ident.name))
+                if (!require_decl_visible(c, fn, expr->line, expr->col, iname))
                     return &TYPE_ERROR_VALUE;
                 return make_function_type(c, fn);
+            }
+
+            /* check top-level const declarations */
+            if (c->program) {
+                for (int gi = 0; gi < c->program->as.program.decls.count; gi++) {
+                    Node *gd = c->program->as.program.decls.items[gi];
+                    if (gd->kind == NODE_CONST &&
+                        !strcmp(gd->as.konst.name, iname)) {
+                        if (gd->as.konst.type)
+                            return type_from_ast(c, gd->as.konst.type);
+                        return check_expr(c, NULL, gd->as.konst.value, unsafe_depth);
+                    }
+                }
             }
 
             return &TYPE_ERROR_VALUE;
@@ -1571,6 +1592,57 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                              "cannot infer container type for %s without context",
                              callee->as.ident.name);
                 return &TYPE_ERROR_VALUE;
+            }
+
+            /* ── built-in I/O calls ── */
+            if (callee->kind == NODE_IDENT) {
+                const char *nm = callee->as.ident.name;
+                /* void-returning output functions */
+                if (!strcmp(nm, "print")     || !strcmp(nm, "println")  ||
+                    !strcmp(nm, "eprint")    || !strcmp(nm, "eprintln") ||
+                    !strcmp(nm, "print_int") || !strcmp(nm, "print_long")||
+                    !strcmp(nm, "print_uint")|| !strcmp(nm, "print_ulong")||
+                    !strcmp(nm, "print_f32") || !strcmp(nm, "print_f64") ||
+                    !strcmp(nm, "print_bool")|| !strcmp(nm, "print_char")||
+                    !strcmp(nm, "flush")) {
+                    for (int i = 0; i < expr->as.call.args.count; i++)
+                        check_expr(c, scope, expr->as.call.args.items[i], unsafe_depth);
+                    return &TYPE_VOID_VALUE;
+                }
+                /* cstr-returning input functions */
+                if (!strcmp(nm, "input"))
+                    return &TYPE_CSTR_VALUE;
+                /* typed read functions */
+                if (!strcmp(nm, "read_int")  || !strcmp(nm, "read_long"))
+                    return &TYPE_I32_VALUE;
+                if (!strcmp(nm, "read_uint"))
+                    return &TYPE_U32_VALUE;
+                if (!strcmp(nm, "read_f64"))
+                    return &TYPE_F64_VALUE;
+            }
+            /* stream method calls: stdout.flush(), stderr.flush(), stdin.read_line() */
+            if (callee->kind == NODE_FIELD) {
+                Node *obj = callee->as.field.object;
+                const char *field = callee->as.field.field;
+                if (obj->kind == NODE_IDENT) {
+                    const char *oname = obj->as.ident.name;
+                    if ((!strcmp(oname, "stdout") || !strcmp(oname, "stderr")) &&
+                        !strcmp(field, "flush"))
+                        return &TYPE_VOID_VALUE;
+                    if ((!strcmp(oname, "stdout") || !strcmp(oname, "stderr")) &&
+                        !strcmp(field, "write")) {
+                        for (int i = 0; i < expr->as.call.args.count; i++)
+                            check_expr(c, scope, expr->as.call.args.items[i], unsafe_depth);
+                        return &TYPE_VOID_VALUE;
+                    }
+                    if (!strcmp(oname, "stdin") &&
+                        (!strcmp(field, "read_line") || !strcmp(field, "read_int") ||
+                         !strcmp(field, "read_f64"))) {
+                        if (!strcmp(field, "read_line")) return &TYPE_CSTR_VALUE;
+                        if (!strcmp(field, "read_int"))  return &TYPE_I32_VALUE;
+                        if (!strcmp(field, "read_f64"))  return &TYPE_F64_VALUE;
+                    }
+                }
             }
 
             if (callee->kind == NODE_FIELD) {
@@ -2292,7 +2364,8 @@ int typeck_check(Node *program, const SemanticModel *sema, const char *source_na
 
     memset(&c, 0, sizeof(c));
     c.source_name = source_name;
-    c.sema = sema;
+    c.sema        = sema;
+    c.program     = program;
 
     for (int i = 0; i < program->as.program.decls.count && !c.had_error; i++) {
         Node *decl = program->as.program.decls.items[i];
@@ -2302,6 +2375,11 @@ int typeck_check(Node *program, const SemanticModel *sema, const char *source_na
         } else if (decl->kind == NODE_IMPL_DECL) {
             for (int j = 0; j < decl->as.impl.methods.count && !c.had_error; j++) {
                 if (!check_function(&c, decl->as.impl.methods.items[j]))
+                    c.had_error = 1;
+            }
+        } else if (decl->kind == NODE_KERNEL_APP) {
+            for (int j = 0; j < decl->as.kernel_app.fns.count && !c.had_error; j++) {
+                if (!check_function(&c, decl->as.kernel_app.fns.items[j]))
                     c.had_error = 1;
             }
         }

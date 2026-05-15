@@ -1,0 +1,13 @@
+package kernel.serialtest;
+
+kernel app SerialDemo {
+    fn port_addr(base: u16, reg: u16) -> u16 {
+        return base + reg;
+    }
+
+    fn main() -> void {
+        let com1: u16 = 0x3F8;
+        let data_port: u16 = port_addr(com1, 0);
+        if data_port == 0x3F8 { com1; }
+    }
+}

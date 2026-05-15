@@ -1,0 +1,36 @@
+package kernel.vga;
+
+const VGA_COLS: i32 = 80;
+const VGA_ROWS: i32 = 25;
+
+const COLOR_BLACK:  u8 = 0;
+const COLOR_WHITE:  u8 = 15;
+const COLOR_GREEN:  u8 = 2;
+const COLOR_RED:    u8 = 4;
+const COLOR_BLUE:   u8 = 9;
+const COLOR_YELLOW: u8 = 14;
+
+fn make_color_byte(fg: u8, bg: u8) -> u8 {
+    return (bg << 4) | fg;
+}
+
+fn make_entry(c: u8, fg: u8, bg: u8) -> u16 {
+    let color: u8 = make_color_byte(fg, bg);
+    return (color as u16 << 8) | c as u16;
+}
+
+fn vga_index(row: i32, col: i32) -> i32 {
+    return row * VGA_COLS + col;
+}
+
+pub fn entry_for(c: u8, fg: u8, bg: u8) -> u16 {
+    return make_entry(c, fg, bg);
+}
+
+pub fn index_of(row: i32, col: i32) -> i32 {
+    return vga_index(row, col);
+}
+
+pub fn color_white_on_black() -> u8 {
+    return make_color_byte(COLOR_WHITE, COLOR_BLACK);
+}

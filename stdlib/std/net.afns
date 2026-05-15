@@ -1,0 +1,34 @@
+package std.net;
+
+extern "C" fn socket(domain: i32, type: i32, proto: i32) -> i32;
+extern "C" fn bind(fd: i32, addr: *u8, len: u32) -> i32;
+extern "C" fn listen(fd: i32, backlog: i32) -> i32;
+extern "C" fn accept(fd: i32, addr: *u8, len: *u32) -> i32;
+extern "C" fn connect(fd: i32, addr: *u8, len: u32) -> i32;
+extern "C" fn send(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
+extern "C" fn recv(fd: i32, buf: *u8, len: usize, flags: i32) -> i64;
+extern "C" fn close(fd: i32) -> i32;
+
+const AF_INET:  i32 = 2;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM:  i32 = 2;
+
+pub fn tcp_socket() -> i32 {
+    return socket(AF_INET, SOCK_STREAM, 0);
+}
+
+pub fn udp_socket() -> i32 {
+    return socket(AF_INET, SOCK_DGRAM, 0);
+}
+
+pub fn tcp_send(fd: i32, buf: *u8, len: usize) -> i64 {
+    return send(fd, buf, len, 0);
+}
+
+pub fn tcp_recv(fd: i32, buf: *u8, len: usize) -> i64 {
+    return recv(fd, buf, len, 0);
+}
+
+pub fn tcp_close(fd: i32) -> i32 {
+    return close(fd);
+}

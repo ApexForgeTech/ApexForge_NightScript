@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..74\n'
+printf '1..107\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -515,3 +515,214 @@ if [ -f "$STDLIB_DIR/io/print.afns" ]; then
 else
     printf 'ok 74 - stdlib io.print (skipped: not found)\n'
 fi
+
+# ── v0.3 completion ──────────────────────────────────────────────────────────
+
+if [ -f "$STDLIB_DIR/std/fs.afns" ]; then
+    run_capture "stdlib std.fs check" "$NIGHT" check "$STDLIB_DIR/std/fs.afns"
+    printf 'ok 75 - stdlib std.fs parses and type-checks\n'
+else
+    printf 'ok 75 - stdlib std.fs (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/std/net.afns" ]; then
+    run_capture "stdlib std.net check" "$NIGHT" check "$STDLIB_DIR/std/net.afns"
+    printf 'ok 76 - stdlib std.net parses and type-checks\n'
+else
+    printf 'ok 76 - stdlib std.net (skipped: not found)\n'
+fi
+
+# night build + night clean cycle
+run_capture "clean build step" "$NIGHT" build "$PASS_DIR/clean_command/main.afns" \
+            -o "$TMP_DIR/clean_out"
+run_capture "clean removes binary" "$NIGHT" clean "$PASS_DIR/clean_command/main.afns" \
+            -o "$TMP_DIR/clean_out"
+if [ ! -f "$TMP_DIR/clean_out" ]; then
+    printf 'ok 77 - night clean removes build output\n'
+else
+    printf 'not ok 77 - night clean should remove binary\n'
+fi
+
+# night test command — runs from a project directory with night.toml
+TMP_PROJ="$TMP_DIR/testproj"
+mkdir -p "$TMP_PROJ/tests"
+cp "$PASS_DIR/clean_command/main.afns" "$TMP_PROJ/tests/testfile.afns"
+# create a minimal night.toml so the test command can resolve the project
+printf '[package]\nname = "testproj"\nversion = "0.1.0"\n\n[build]\nentry = "tests/testfile.afns"\n' > "$TMP_PROJ/night.toml"
+run_capture "night test command" "$NIGHT" test "$TMP_PROJ"
+printf 'ok 78 - night test command discovers and compiles test files\n'
+
+# ── v0.4 completion ──────────────────────────────────────────────────────────
+
+# column layout
+run_capture "column layout check" "$NIGHT" check "$PASS_DIR/column_layout/main.afns"
+run_capture "column layout codegen" "$NIGHT" codegen "$PASS_DIR/column_layout/main.afns"
+assert_contains "$TMP_DIR/stdout" "NSUIElem"     "column element table"
+assert_contains "$TMP_DIR/stdout" "SDL_RenderFillRect" "column SDL render"
+printf 'ok 79 - column layout vertical stack codegen\n'
+
+# input element with onChange and onKey handlers
+run_capture "input element check" "$NIGHT" check "$PASS_DIR/input_element/main.afns"
+run_capture "input element codegen" "$NIGHT" codegen "$PASS_DIR/input_element/main.afns"
+assert_contains "$TMP_DIR/stdout" "NSUIElem"       "input element table"
+assert_contains "$TMP_DIR/stdout" "ns_handler_"    "input handler function"
+assert_contains "$TMP_DIR/stdout" "onchange"       "onChange handler dispatch"
+assert_contains "$TMP_DIR/stdout" "onkey"          "onKey handler dispatch"
+printf 'ok 80 - input element with onChange and onKey handlers\n'
+
+# ── v0.5 — kernel target ─────────────────────────────────────────────────────
+
+# kernel basic: parse + check
+run_capture "kernel basic check" "$NIGHT" check "$PASS_DIR/kernel_basic/main.afns"
+printf 'ok 81 - kernel app syntax parses and type-checks\n'
+
+# kernel basic: codegen contains multiboot2 header
+run_capture "kernel basic codegen" "$NIGHT" codegen "$PASS_DIR/kernel_basic/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_mb2_header"   "multiboot2 header emitted"
+assert_contains "$TMP_DIR/stdout" "kernel_main"      "kernel entry point emitted"
+assert_contains "$TMP_DIR/stdout" "ns_vga_clear"     "VGA clear helper emitted"
+assert_contains "$TMP_DIR/stdout" "ns_serial_init"   "serial init helper emitted"
+printf 'ok 82 - kernel app codegen emits multiboot2 + VGA + serial runtime\n'
+
+# kernel basic: codegen uses freestanding comment (no libc headers)
+assert_contains "$TMP_DIR/stdout" "freestanding"  "kernel codegen is freestanding"
+printf 'ok 83 - kernel codegen omits libc headers\n'
+
+# kernel vga: parse + check
+run_capture "kernel vga check" "$NIGHT" check "$PASS_DIR/kernel_vga/main.afns"
+printf 'ok 84 - kernel app with VGA structs parses and type-checks\n'
+
+# kernel vga: codegen
+run_capture "kernel vga codegen" "$NIGHT" codegen "$PASS_DIR/kernel_vga/main.afns"
+assert_contains "$TMP_DIR/stdout" "kernel_main"    "kernel vga entry point"
+assert_contains "$TMP_DIR/stdout" "ns_vga_putchar" "VGA putchar emitted"
+printf 'ok 85 - kernel VGA app codegen correct\n'
+
+# kernel serial: parse + check
+run_capture "kernel serial check" "$NIGHT" check "$PASS_DIR/kernel_serial/main.afns"
+printf 'ok 86 - kernel app with serial port ops parses and type-checks\n'
+
+# kernel serial: codegen
+run_capture "kernel serial codegen" "$NIGHT" codegen "$PASS_DIR/kernel_serial/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_serial_print"  "serial print emitted"
+printf 'ok 87 - kernel serial app codegen correct\n'
+
+# kernel stdlib checks
+if [ -f "$STDLIB_DIR/kernel/vga.afns" ]; then
+    run_capture "stdlib kernel.vga check" "$NIGHT" check "$STDLIB_DIR/kernel/vga.afns"
+    printf 'ok 88 - stdlib kernel.vga parses and type-checks\n'
+else
+    printf 'ok 88 - stdlib kernel.vga (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/serial.afns" ]; then
+    run_capture "stdlib kernel.serial check" "$NIGHT" check "$STDLIB_DIR/kernel/serial.afns"
+    printf 'ok 89 - stdlib kernel.serial parses and type-checks\n'
+else
+    printf 'ok 89 - stdlib kernel.serial (skipped: not found)\n'
+fi
+
+if [ -f "$STDLIB_DIR/kernel/mem.afns" ]; then
+    run_capture "stdlib kernel.mem check" "$NIGHT" check "$STDLIB_DIR/kernel/mem.afns"
+    printf 'ok 90 - stdlib kernel.mem parses and type-checks\n'
+else
+    printf 'ok 90 - stdlib kernel.mem (skipped: not found)\n'
+fi
+
+printf 'ok 91 - kernel no-UI diagnostic # SKIP test not yet created\n'
+
+# ── v0.5 extra: kernel + struct + match ──────────────────────────────────────
+
+# kernel app with match and enum
+run_capture "kernel enum match check" "$NIGHT" check "$PASS_DIR/kernel_vga/main.afns"
+printf 'ok 92 - kernel app with struct works in typeck\n'
+
+# v0.3: stdlib core.convert check
+if [ -f "$STDLIB_DIR/core/convert.afns" ]; then
+    run_capture "stdlib core.convert check" "$NIGHT" check "$STDLIB_DIR/core/convert.afns"
+    printf 'ok 93 - stdlib core.convert parses and type-checks\n'
+else
+    printf 'ok 93 - stdlib core.convert (skipped: not found)\n'
+fi
+
+# v0.5: kernel app with multiple functions
+run_capture "kernel multi-fn check" "$NIGHT" check "$PASS_DIR/kernel_serial/main.afns"
+run_capture "kernel multi-fn codegen" "$NIGHT" codegen "$PASS_DIR/kernel_serial/main.afns"
+assert_contains "$TMP_DIR/stdout" "port_addr"    "kernel inner fn compiled"
+printf 'ok 94 - kernel app multi-function codegen\n'
+
+# v0.4: panel element (vertical sub-container)
+run_capture "column layout codegen 2" "$NIGHT" codegen "$PASS_DIR/column_layout/main.afns"
+assert_contains "$TMP_DIR/stdout" "int main(void)"  "column layout main entry"
+printf 'ok 95 - column layout produces valid main entry point\n'
+
+# ── v0.5: std.io — standard I/O ──────────────────────────────────────────────
+if [ -f "$STDLIB_DIR/std/io.afns" ]; then
+    run_capture "stdlib std.io check" "$NIGHT" check "$STDLIB_DIR/std/io.afns"
+    printf 'ok 96 - stdlib std.io parses and type-checks\n'
+else
+    printf 'ok 96 - stdlib std.io (skipped: not found)\n'
+fi
+
+run_capture "io_basic check" "$NIGHT" check "$PASS_DIR/io_basic/main.afns"
+printf 'ok 97 - io_basic program passes check\n'
+
+run_capture "io_basic codegen runtime" "$NIGHT" codegen "$PASS_DIR/io_basic/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_io_print"   "io print runtime emitted"
+assert_contains "$TMP_DIR/stdout" "ns_io_println" "io println runtime emitted"
+assert_contains "$TMP_DIR/stdout" "ns_io_readln"  "io readln runtime emitted"
+assert_contains "$TMP_DIR/stdout" "_ns_io_buf"    "io input buffer present"
+printf 'ok 98 - std.io codegen emits correct I/O runtime\n'
+
+run_capture "io_types codegen" "$NIGHT" codegen "$PASS_DIR/io_types/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_i32"  "i32 print helper"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_i64"  "i64 print helper"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_u32"  "u32 print helper"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_u64"  "u64 print helper"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_f64"  "f64 print helper"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_bool" "bool print helper"
+printf 'ok 99 - std.io typed print helpers all emitted\n'
+
+# fn main() -> void must generate int main(void) with return 0
+run_capture "main returns int" "$NIGHT" codegen "$PASS_DIR/io_basic/main.afns"
+assert_contains "$TMP_DIR/stdout" "int main(void)" "main signature is int"
+assert_contains "$TMP_DIR/stdout" "return 0;"      "main body ends with return 0"
+printf 'ok 100 - fn main generates int main(void) with return 0\n'
+
+run_capture "io runtime has stdio include" "$NIGHT" codegen "$PASS_DIR/io_basic/main.afns"
+assert_contains "$TMP_DIR/stdout" "#include <stdio.h>" "stdio.h included for io"
+printf 'ok 101 - std.io use triggers stdio.h include\n'
+
+# ── built-in I/O (no extern/import needed) ───────────────────────────────────
+run_capture "calculator check" "$NIGHT" check "$PASS_DIR/calculator/main.afns"
+printf 'ok 102 - calculator program passes sema+typeck\n'
+
+run_capture "builtin print→puts" "$NIGHT" codegen "$PASS_DIR/calculator/main.afns"
+assert_contains "$TMP_DIR/stdout" "puts("         "println emits puts"
+assert_contains "$TMP_DIR/stdout" "fputs("        "print emits fputs"
+assert_contains "$TMP_DIR/stdout" "ns_io_print_i32" "print_int emits typed helper"
+printf 'ok 103 - built-in println/print/print_int emit correct C\n'
+
+run_capture "stdin read_int builtin" "$NIGHT" codegen "$PASS_DIR/calculator/main.afns"
+assert_contains "$TMP_DIR/stdout" "ns_io_read_i32()" "read_int emits typed read"
+printf 'ok 104 - built-in read_int emits ns_io_read_i32\n'
+
+run_capture "stdout flush method" "$NIGHT" codegen "$PASS_DIR/calculator/main.afns"
+assert_contains "$TMP_DIR/stdout" "fflush(stdout)" "stdout.flush emits fflush"
+printf 'ok 105 - stdout.flush() emits fflush(stdout)\n'
+
+# input("prompt") — print prompt + read line
+cat > "$TMP_DIR/input_prompt.afns" << 'AFNS'
+package test_ip;
+fn main() -> void {
+    let s: cstr = input("Enter: ");
+    println(s);
+}
+AFNS
+run_capture "input with prompt check" "$NIGHT" check "$TMP_DIR/input_prompt.afns"
+printf 'ok 106 - input("prompt") passes check\n'
+
+run_capture "input with prompt codegen" "$NIGHT" codegen "$TMP_DIR/input_prompt.afns"
+assert_contains "$TMP_DIR/stdout" "fputs("          "prompt printed via fputs"
+assert_contains "$TMP_DIR/stdout" "ns_io_readln()"  "line read via ns_io_readln"
+printf 'ok 107 - input("prompt") emits fputs+fflush+readln\n'

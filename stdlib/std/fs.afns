@@ -1,0 +1,42 @@
+package std.fs;
+
+extern "C" fn fopen(path: cstr, mode: cstr) -> *u8;
+extern "C" fn fclose(fp: *u8) -> i32;
+extern "C" fn fread(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
+extern "C" fn fwrite(buf: *u8, size: usize, count: usize, fp: *u8) -> usize;
+extern "C" fn fseek(fp: *u8, offset: i64, whence: i32) -> i32;
+extern "C" fn ftell(fp: *u8) -> i64;
+extern "C" fn remove(path: cstr) -> i32;
+extern "C" fn rename(old: cstr, new: cstr) -> i32;
+
+pub fn open(path: cstr, mode: cstr) -> *u8 {
+    return fopen(path, mode);
+}
+
+pub fn close(fp: *u8) -> i32 {
+    return fclose(fp);
+}
+
+pub fn read(fp: *u8, buf: *u8, count: usize) -> usize {
+    return fread(buf, 1, count, fp);
+}
+
+pub fn write(fp: *u8, buf: *u8, count: usize) -> usize {
+    return fwrite(buf, 1, count, fp);
+}
+
+pub fn seek(fp: *u8, offset: i64, whence: i32) -> i32 {
+    return fseek(fp, offset, whence);
+}
+
+pub fn tell(fp: *u8) -> i64 {
+    return ftell(fp);
+}
+
+pub fn delete(path: cstr) -> i32 {
+    return remove(path);
+}
+
+pub fn move(old_path: cstr, new_path: cstr) -> i32 {
+    return rename(old_path, new_path);
+}
