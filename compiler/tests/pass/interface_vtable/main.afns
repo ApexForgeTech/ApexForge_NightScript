@@ -1,0 +1,31 @@
+interface Greet {
+    fn greet(self: *Greet) -> void;
+}
+
+struct Dog {
+    kind: i32;
+}
+
+impl Dog : Greet {
+    fn greet(self: *Dog) -> void {
+        println("Woof!");
+    }
+}
+
+struct Cat {
+    kind: i32;
+}
+
+impl Cat : Greet {
+    fn greet(self: *Cat) -> void {
+        println("Meow!");
+    }
+}
+
+fn main() -> i32 {
+    let d: Dog = Dog { kind: 1 };
+    let c: Cat = Cat { kind: 2 };
+    let gd: Greet = Dog_as_Greet(&d);
+    let gc: Greet = Cat_as_Greet(&c);
+    return 0;
+}

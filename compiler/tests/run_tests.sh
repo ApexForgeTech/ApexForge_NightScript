@@ -54,7 +54,7 @@ run_fail_case() {
     assert_contains "$TMP_DIR/stderr" "$needle" "$name"
 }
 
-printf '1..161\n'
+printf '1..169\n'
 
 run_capture "hello check" "$NIGHT" check "$PASS_DIR/hello.afns"
 printf 'ok 1 - hello check\n'
@@ -1168,3 +1168,37 @@ assert_contains "$TMP_DIR/stdout" "ns_path_is_file"     "path is_file helper pre
 assert_contains "$TMP_DIR/stdout" "ns_process_getpid"   "process getpid helper present"
 assert_contains "$TMP_DIR/stdout" "ns_fs_mkdir"         "fs mkdir helper present"
 printf 'ok 161 - v0.6 stdlib: math/convert/time/env/path/process/fs runtime present\n'
+
+# ── v0.7 Generics ──
+run_capture "generic fn check" "$NIGHT" check "$PASS_DIR/generic_fn/main.afns"
+printf 'ok 162 - v0.7 generic function: check passes\n'
+
+run_capture "generic fn codegen" "$NIGHT" codegen "$PASS_DIR/generic_fn/main.afns"
+assert_contains "$TMP_DIR/stdout" "max_int32_t" "generic fn monomorphized"
+printf 'ok 163 - v0.7 generic function: monomorphized to max_int32_t\n'
+
+run_capture "generic fn run" "$NIGHT" run "$PASS_DIR/generic_fn/main.afns" -o "$TMP_DIR/gfn_bin"
+assert_contains "$TMP_DIR/stdout" "20" "generic fn returns correct max value"
+printf 'ok 164 - v0.7 generic function: run produces correct output\n'
+
+run_capture "generic struct codegen" "$NIGHT" codegen "$PASS_DIR/generic_struct/main.afns"
+assert_contains "$TMP_DIR/stdout" "Pair_i32" "generic struct monomorphized"
+printf 'ok 165 - v0.7 generic struct: monomorphized to Pair_i32\n'
+
+run_capture "generic struct run" "$NIGHT" run "$PASS_DIR/generic_struct/main.afns" -o "$TMP_DIR/gst_bin"
+assert_contains "$TMP_DIR/stdout" "10" "generic struct first field"
+printf 'ok 166 - v0.7 generic struct: run produces correct field values\n'
+
+# ── v0.7 Comptime ──
+run_capture "comptime codegen" "$NIGHT" codegen "$PASS_DIR/comptime/main.afns"
+assert_contains "$TMP_DIR/stdout" "#define VERSION" "comptime const emitted as #define"
+printf 'ok 167 - v0.7 comptime: const emitted as #define\n'
+
+# ── v0.7 Interfaces ──
+run_capture "interface vtable codegen" "$NIGHT" codegen "$PASS_DIR/interface_vtable/main.afns"
+assert_contains "$TMP_DIR/stdout" "Greet_vtable" "interface vtable struct emitted"
+assert_contains "$TMP_DIR/stdout" "Dog_as_Greet" "interface coercion fn emitted"
+printf 'ok 168 - v0.7 interface: vtable struct and coercion fn emitted\n'
+
+run_capture "interface vtable build" "$NIGHT" build "$PASS_DIR/interface_vtable/main.afns" -o "$TMP_DIR/ivt_bin"
+printf 'ok 169 - v0.7 interface: vtable impl compiles and links\n'

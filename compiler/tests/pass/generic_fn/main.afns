@@ -1,0 +1,13 @@
+fn max[T](a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn main() -> i32 {
+    let x: i32 = max[i32](10, 20);
+    print_int(x);
+    println("\n");
+    return 0;
+}

@@ -343,6 +343,76 @@ static Node *parse_primary(Parser *p) {
 
     if (match(p, TOK_IDENT) || match(p, TOK_SELF)) {
         Token *id = prev(p);
+        /* generic struct literal: Name[TypeArg] { field: val, ... } */
+        if (check(p, TOK_LBRACKET)) {
+            /* scan ahead to find matching ] and check if { follows with struct pattern */
+            int scan = p->pos + 1;
+            int depth = 1;
+            while (scan < p->tl->count && depth > 0) {
+                TokenKind sk = p->tl->tokens[scan].kind;
+                if (sk == TOK_LBRACKET) depth++;
+                else if (sk == TOK_RBRACKET) depth--;
+                scan++;
+            }
+            int is_gen_sl = 0;
+            if (scan < p->tl->count && p->tl->tokens[scan].kind == TOK_LBRACE) {
+                if (scan + 1 < p->tl->count) {
+                    TokenKind nk1 = p->tl->tokens[scan + 1].kind;
+                    if (nk1 == TOK_RBRACE) is_gen_sl = 1;
+                    else if (nk1 == TOK_IDENT && scan + 2 < p->tl->count &&
+                             p->tl->tokens[scan + 2].kind == TOK_COLON)
+                        is_gen_sl = 1;
+                }
+            }
+            if (is_gen_sl) {
+                /* build "Name[TypeArg]" string */
+                char gen_name[256];
+                int gnlen = id->len < 200 ? id->len : 200;
+                memcpy(gen_name, id->start, (size_t)gnlen);
+                gen_name[gnlen++] = '[';
+                p->pos++; /* consume [ */
+                while (p->pos < p->tl->count) {
+                    Token *tt = &p->tl->tokens[p->pos];
+                    if (tt->kind == TOK_RBRACKET) { p->pos++; break; }
+                    int avail = (int)(sizeof(gen_name)) - gnlen - 2;
+                    int tl = (tt->len < avail) ? tt->len : avail;
+                    if (tl > 0) { memcpy(gen_name + gnlen, tt->start, (size_t)tl); gnlen += tl; }
+                    p->pos++;
+                }
+                gen_name[gnlen++] = ']';
+                gen_name[gnlen] = '\0';
+                char *comp_name = arena_strdup(p->arena, gen_name, (size_t)gnlen);
+                p->pos++; /* consume { */
+                int    cap    = 8;
+                char **fnames = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+                Node **fvals  = arena_alloc(p->arena, (size_t)cap * sizeof(Node *));
+                int    count  = 0;
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    Token *fn_tok = expect(p, TOK_IDENT, "expected field name");
+                    expect(p, TOK_COLON, "expected ':' after field name");
+                    Node *fv = parse_expr(p);
+                    match(p, TOK_COMMA);
+                    if (count == cap) {
+                        cap *= 2;
+                        char **nn = arena_alloc(p->arena, (size_t)cap * sizeof(char *));
+                        Node **nv = arena_alloc(p->arena, (size_t)cap * sizeof(Node *));
+                        memcpy(nn, fnames, (size_t)count * sizeof(char *));
+                        memcpy(nv, fvals,  (size_t)count * sizeof(Node *));
+                        fnames = nn; fvals = nv;
+                    }
+                    fnames[count] = intern(p, fn_tok);
+                    fvals[count]  = fv;
+                    count++;
+                }
+                expect(p, TOK_RBRACE, "expected '}' after struct literal");
+                Node *n = node_new(p, NODE_STRUCT_LIT, id->line, id->col);
+                n->as.struct_lit.type_name    = comp_name;
+                n->as.struct_lit.field_names  = fnames;
+                n->as.struct_lit.field_values = fvals;
+                n->as.struct_lit.count        = count;
+                return n;
+            }
+        }
         /* struct literal: Name { field: val, ... } */
         if (check(p, TOK_LBRACE)) {
             /* peek ahead: { } or { ident : ... } */
@@ -901,22 +971,39 @@ static Node *parse_ui_element(Parser *p) {
 
 /* ── declaration parsing ───────────────────────────────────────────────── */
 
+/* Parse optional [T, E, ...] generic type parameters */
+static NodeList parse_type_params(Parser *p) {
+    NodeList tp = {0};
+    if (!check(p, TOK_LBRACKET)) return tp;
+    p->pos++; /* consume [ */
+    do {
+        Token *t = expect(p, TOK_IDENT, "expected type parameter name");
+        Node *n = node_new(p, NODE_TYPE_NAMED, t->line, t->col);
+        n->as.type_named.name = intern(p, t);
+        nodelist_push(p, &tp, n);
+    } while (match(p, TOK_COMMA));
+    expect(p, TOK_RBRACKET, "expected ']' after type parameters");
+    return tp;
+}
+
 static Node *parse_fn_decl(Parser *p, int is_public, char *owner_type) {
     Token *t    = prev(p); /* 'fn' already consumed */
     Token *name = expect(p, TOK_IDENT, "expected function name");
+    NodeList type_params = parse_type_params(p); /* [T, E, ...] optional */
     NodeList params = parse_params(p);
     expect(p, TOK_ARROW, "expected '->' before return type");
     Node *ret  = parse_type(p);
     Node *body = parse_block(p);
 
     Node *n = node_new(p, NODE_FN_DECL, t->line, t->col);
-    n->as.fn.name       = intern(p, name);
-    n->as.fn.owner_type = owner_type;
+    n->as.fn.name        = intern(p, name);
+    n->as.fn.owner_type  = owner_type;
     n->as.fn.package_name = p->current_package;
-    n->as.fn.params     = params;
-    n->as.fn.ret_type   = ret;
-    n->as.fn.body       = body;
-    n->as.fn.is_public  = is_public;
+    n->as.fn.type_params = type_params;
+    n->as.fn.params      = params;
+    n->as.fn.ret_type    = ret;
+    n->as.fn.body        = body;
+    n->as.fn.is_public   = is_public;
     return n;
 }
 
@@ -996,10 +1083,41 @@ static Node *parse_decl(Parser *p) {
         return n;
     }
 
+    if (match(p, TOK_COMPTIME)) {
+        expect(p, TOK_LBRACE, "expected '{' after 'comptime'");
+        NodeList decls = {0};
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            int cpub = match(p, TOK_PUB);
+            (void)cpub;
+            if (!match(p, TOK_CONST)) {
+                fprintf(stderr, "%s:%d: error: expected 'const' in comptime block\n",
+                        p->src_name, cur(p)->line);
+                p->had_error = 1; p->pos++; continue;
+            }
+            Token *cname = expect(p, TOK_IDENT, "expected name after 'const'");
+            Node *ctype = NULL;
+            if (match(p, TOK_COLON)) ctype = parse_type(p);
+            expect(p, TOK_EQ, "expected '=' in comptime const");
+            Node *cval = parse_expr(p);
+            expect(p, TOK_SEMICOLON, "expected ';' after comptime const");
+            Node *cn = node_new(p, NODE_CONST, cname->line, cname->col);
+            cn->as.konst.name  = intern(p, cname);
+            cn->as.konst.type  = ctype;
+            cn->as.konst.value = cval;
+            nodelist_push(p, &decls, cn);
+        }
+        expect(p, TOK_RBRACE, "expected '}' after comptime block");
+        Node *n = node_new(p, NODE_COMPTIME, t->line, t->col);
+        n->as.comptime_block.decls = decls;
+        return n;
+    }
+
     if (match(p, TOK_PACKED)) {
         /* packed struct */
         expect(p, TOK_STRUCT, "expected 'struct' after 'packed'");
         Token *name = expect(p, TOK_IDENT, "expected struct name");
+        NodeList type_params = parse_type_params(p);
+        (void)type_params; /* packed structs: type_params reserved for future use */
         expect(p, TOK_LBRACE, "expected '{' after struct name");
         NodeList fields = {0};
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -1024,6 +1142,7 @@ static Node *parse_decl(Parser *p) {
 
     if (match(p, TOK_STRUCT)) {
         Token *name = expect(p, TOK_IDENT, "expected struct name");
+        NodeList type_params = parse_type_params(p); /* [T, E] optional */
         expect(p, TOK_LBRACE, "expected '{' after struct name");
         NodeList fields = {0};
         while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -1038,10 +1157,11 @@ static Node *parse_decl(Parser *p) {
         }
         expect(p, TOK_RBRACE, "expected '}' after struct");
         Node *n = node_new(p, NODE_STRUCT_DECL, t->line, t->col);
-        n->as.struct_decl.name      = intern(p, name);
+        n->as.struct_decl.name        = intern(p, name);
         n->as.struct_decl.package_name = p->current_package;
-        n->as.struct_decl.fields    = fields;
-        n->as.struct_decl.is_public = is_public;
+        n->as.struct_decl.type_params = type_params;
+        n->as.struct_decl.fields      = fields;
+        n->as.struct_decl.is_public   = is_public;
         return n;
     }
 

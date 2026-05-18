@@ -1,0 +1,10 @@
+comptime {
+    const MAX_SIZE: usize = 1024;
+    const VERSION: i32 = 7;
+}
+
+fn main() -> i32 {
+    print_int(VERSION);
+    println("\n");
+    return 0;
+}

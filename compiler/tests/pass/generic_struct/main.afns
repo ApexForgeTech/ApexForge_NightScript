@@ -1,0 +1,13 @@
+struct Pair[T] {
+    first: T;
+    second: T;
+}
+
+fn main() -> i32 {
+    let p: Pair[i32] = Pair[i32] { first: 10, second: 20 };
+    print_int(p.first);
+    println("\n");
+    print_int(p.second);
+    println("\n");
+    return 0;
+}

@@ -1832,6 +1832,55 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 }
             }
 
+            /* interface coercion fn: Target_as_Interface(ptr) */
+            if (callee->kind == NODE_IDENT && c->program) {
+                const char *cn = callee->as.ident.name;
+                for (int _ci = 0; _ci < c->program->as.program.decls.count; _ci++) {
+                    Node *_cd = c->program->as.program.decls.items[_ci];
+                    if (_cd->kind == NODE_IMPL_DECL && _cd->as.impl.interface_name) {
+                        char _coerce[256];
+                        snprintf(_coerce, sizeof(_coerce), "%s_as_%s",
+                                 _cd->as.impl.target, _cd->as.impl.interface_name);
+                        if (!strcmp(cn, _coerce)) {
+                            for (int _ai = 0; _ai < expr->as.call.args.count; _ai++)
+                                check_expr(c, scope, expr->as.call.args.items[_ai], unsafe_depth);
+                            return make_named_type(c, _cd->as.impl.interface_name);
+                        }
+                    }
+                }
+            }
+            /* generic fn[TypeArg](args) call — substitute return type and check args */
+            if (callee->kind == NODE_INDEX && callee->as.index_expr.object &&
+                callee->as.index_expr.object->kind == NODE_IDENT) {
+                const char *gfn_name = callee->as.index_expr.object->as.ident.name;
+                for (int _gi = 0; _gi < c->program->as.program.decls.count; _gi++) {
+                    Node *_gd = c->program->as.program.decls.items[_gi];
+                    if (_gd->kind == NODE_FN_DECL &&
+                        _gd->as.fn.type_params.count > 0 &&
+                        !strcmp(_gd->as.fn.name, gfn_name)) {
+                        for (int _ai = 0; _ai < expr->as.call.args.count; _ai++)
+                            check_expr(c, scope, expr->as.call.args.items[_ai], unsafe_depth);
+                        /* resolve return type: if it's a type param, substitute the type arg */
+                        Node *ret_node = _gd->as.fn.ret_type;
+                        Node *ta = callee->as.index_expr.index;
+                        if (ret_node && ret_node->kind == NODE_TYPE_NAMED &&
+                            _gd->as.fn.type_params.count >= 1 &&
+                            !strcmp(ret_node->as.type_named.name,
+                                    _gd->as.fn.type_params.items[0]->as.type_named.name) &&
+                            ta && (ta->kind == NODE_IDENT || ta->kind == NODE_TYPE_NAMED)) {
+                            /* substitute: build a temporary named type node using the type arg */
+                            const char *ns_t = (ta->kind == NODE_IDENT)
+                                               ? ta->as.ident.name : ta->as.type_named.name;
+                            Node tmp_type;
+                            memset(&tmp_type, 0, sizeof(tmp_type));
+                            tmp_type.kind = NODE_TYPE_NAMED;
+                            tmp_type.as.type_named.name = (char *)ns_t;
+                            return type_from_ast(c, &tmp_type);
+                        }
+                        return &TYPE_VOID_VALUE;
+                    }
+                }
+            }
             callee_type = check_expr(c, scope, callee, unsafe_depth);
             if (callee_type->kind != TYPE_FUNCTION) {
                 format_type(callee_type, actual_buf, sizeof(actual_buf));
@@ -1960,6 +2009,20 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 decl = find_named_node(c->sema->structs, c->sema->struct_count, owner, NODE_STRUCT_DECL);
                 if (!decl)
                     decl = find_named_node(c->sema->unions, c->sema->union_count, owner, NODE_UNION_DECL);
+                /* generic struct type like "Pair[i32]": look up by base name */
+                if (!decl) {
+                    const char *lb = strchr(owner, '[');
+                    if (lb) {
+                        char base_owner[256];
+                        size_t blen = (size_t)(lb - owner);
+                        if (blen < sizeof(base_owner)) {
+                            memcpy(base_owner, owner, blen);
+                            base_owner[blen] = '\0';
+                            decl = find_named_node(c->sema->structs, c->sema->struct_count,
+                                                   base_owner, NODE_STRUCT_DECL);
+                        }
+                    }
+                }
 
                 if (!decl) {
                     format_type(object_type, actual_buf, sizeof(actual_buf));
@@ -1983,7 +2046,34 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
                 }
 
                 {
-                    Type *field_type = type_from_ast(c, field_node->as.let.type);
+                    Node *ft_node = field_node->as.let.type;
+                    /* For generic struct fields (type param like T), substitute with concrete type */
+                    if (ft_node && ft_node->kind == NODE_TYPE_NAMED && decl &&
+                        decl->kind == NODE_STRUCT_DECL &&
+                        decl->as.struct_decl.type_params.count > 0) {
+                        const char *lb = strchr(owner, '[');
+                        if (lb && owner[strlen(owner)-1] == ']') {
+                            /* extract type arg */
+                            size_t inner_len = strlen(owner) - (size_t)(lb - owner) - 2;
+                            char inner_buf[256];
+                            if (inner_len < sizeof(inner_buf)) {
+                                memcpy(inner_buf, lb + 1, inner_len);
+                                inner_buf[inner_len] = '\0';
+                                /* Check if field type IS the type param */
+                                for (int _tp = 0; _tp < decl->as.struct_decl.type_params.count; _tp++) {
+                                    const char *tp_name = decl->as.struct_decl.type_params.items[_tp]->as.type_named.name;
+                                    if (!strcmp(ft_node->as.type_named.name, tp_name)) {
+                                        Node tmp_ft;
+                                        memset(&tmp_ft, 0, sizeof(tmp_ft));
+                                        tmp_ft.kind = NODE_TYPE_NAMED;
+                                        tmp_ft.as.type_named.name = inner_buf;
+                                        return type_from_ast(c, &tmp_ft);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Type *field_type = type_from_ast(c, ft_node);
                     if (!ensure_resolved_type_visible(c, field_type, expr->line, expr->col))
                         return &TYPE_ERROR_VALUE;
                     return field_type;
@@ -1992,39 +2082,60 @@ static Type *check_expr(Checker *c, Scope *scope, Node *expr, int unsafe_depth) 
         }
 
         case NODE_STRUCT_LIT: {
+            const char *sl_tname = expr->as.struct_lit.type_name;
             Node *decl = find_named_node(c->sema->structs, c->sema->struct_count,
-                                         expr->as.struct_lit.type_name, NODE_STRUCT_DECL);
+                                         sl_tname, NODE_STRUCT_DECL);
             if (!decl)
                 decl = find_named_node(c->sema->unions, c->sema->union_count,
-                                       expr->as.struct_lit.type_name, NODE_UNION_DECL);
+                                       sl_tname, NODE_UNION_DECL);
+            /* generic struct instantiation: find by base name */
+            int is_generic_sl = 0;
+            if (!decl) {
+                const char *lb = strchr(sl_tname, '[');
+                if (lb && sl_tname[strlen(sl_tname)-1] == ']') {
+                    size_t blen = (size_t)(lb - sl_tname);
+                    char base[256];
+                    if (blen < sizeof(base)) {
+                        memcpy(base, sl_tname, blen); base[blen] = '\0';
+                        decl = find_named_node(c->sema->structs, c->sema->struct_count,
+                                               base, NODE_STRUCT_DECL);
+                        if (decl) is_generic_sl = 1;
+                    }
+                }
+            }
 
             if (!decl)
                 return &TYPE_ERROR_VALUE;
-            if (!require_decl_visible(c, decl, expr->line, expr->col,
-                                      expr->as.struct_lit.type_name))
-                return &TYPE_ERROR_VALUE;
 
+            /* for generic struct literals, just check field values exist and are valid */
             for (int i = 0; i < expr->as.struct_lit.count; i++) {
-                Node *field_node = NULL;
-                Type *expected;
-                Type *actual;
+                if (is_generic_sl) {
+                    /* just check the value expression without field type checking */
+                    check_expr(c, scope, expr->as.struct_lit.field_values[i], unsafe_depth);
+                } else {
+                    Node *field_node = NULL;
+                    Type *expected;
+                    Type *actual;
 
-                if (!composite_has_field(decl, expr->as.struct_lit.field_names[i], &field_node))
-                    return &TYPE_ERROR_VALUE;
+                    if (!require_decl_visible(c, decl, expr->line, expr->col, sl_tname))
+                        return &TYPE_ERROR_VALUE;
+                    if (!composite_has_field(decl, expr->as.struct_lit.field_names[i], &field_node))
+                        return &TYPE_ERROR_VALUE;
 
-                expected = type_from_ast(c, field_node->as.let.type);
-                actual = check_expr(c, scope, expr->as.struct_lit.field_values[i], unsafe_depth);
-                if (!is_assignable(expected, actual)) {
-                    format_type(expected, expected_buf, sizeof(expected_buf));
-                    format_type(actual, actual_buf, sizeof(actual_buf));
-                    typeck_error(c, expr->as.struct_lit.field_values[i]->line,
-                                 expr->as.struct_lit.field_values[i]->col,
-                                 "cannot initialize field '%s' with %s; expected %s",
-                                 expr->as.struct_lit.field_names[i], actual_buf, expected_buf);
-                    return &TYPE_ERROR_VALUE;
+                    expected = type_from_ast(c, field_node->as.let.type);
+                    actual = check_expr(c, scope, expr->as.struct_lit.field_values[i], unsafe_depth);
+                    if (!is_assignable(expected, actual)) {
+                        format_type(expected, expected_buf, sizeof(expected_buf));
+                        format_type(actual, actual_buf, sizeof(actual_buf));
+                        typeck_error(c, expr->as.struct_lit.field_values[i]->line,
+                                     expr->as.struct_lit.field_values[i]->col,
+                                     "cannot initialize field '%s' with %s; expected %s",
+                                     expr->as.struct_lit.field_names[i], actual_buf, expected_buf);
+                        return &TYPE_ERROR_VALUE;
+                    }
                 }
             }
-            return make_named_type(c, expr->as.struct_lit.type_name);
+            return make_named_type(c, sl_tname);
         }
 
         case NODE_MATCH:
@@ -2380,6 +2491,8 @@ int typeck_check(Node *program, const SemanticModel *sema, const char *source_na
     for (int i = 0; i < program->as.program.decls.count && !c.had_error; i++) {
         Node *decl = program->as.program.decls.items[i];
         if (decl->kind == NODE_FN_DECL) {
+            /* skip type-checking generic templates — done at monomorphization */
+            if (decl->as.fn.type_params.count > 0) continue;
             if (!check_function(&c, decl))
                 c.had_error = 1;
         } else if (decl->kind == NODE_IMPL_DECL) {

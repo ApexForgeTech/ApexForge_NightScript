@@ -55,6 +55,7 @@ typedef enum {
     NODE_UNION_DECL,
     NODE_IMPL_DECL,
     NODE_INTERFACE_DECL,
+    NODE_COMPTIME,       /* comptime { const ... } */
 
     /* UI declarations (v0.4) */
     NODE_UI_APP,
@@ -254,6 +255,7 @@ struct Node {
             char    *name;
             char    *owner_type;  /* NULL for free functions */
             char    *package_name; /* declaring package */
+            NodeList type_params; /* generic type params: [T, E] */
             NodeList params;      /* each param: NODE_LET (name+type) */
             Node    *ret_type;
             Node    *body;        /* NULL for extern */
@@ -274,6 +276,7 @@ struct Node {
         struct {
             char    *name;
             char    *package_name; /* declaring package */
+            NodeList type_params; /* generic type params: [T] */
             NodeList fields;   /* each field: NODE_LET (name+type) */
             int      is_public;
             int      is_packed;
@@ -350,6 +353,11 @@ struct Node {
             NodeList fns;        /* NODE_FN_DECL items */
             int      is_public;
         } kernel_app;
+
+        /* NODE_COMPTIME */
+        struct {
+            NodeList decls;  /* NODE_CONST items */
+        } comptime_block;
 
     } as;
 };

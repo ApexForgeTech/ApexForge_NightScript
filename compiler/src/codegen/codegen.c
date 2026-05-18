@@ -56,6 +56,45 @@ static int has_kernel_app(Node *prog);
 typedef struct SliceDef SliceDef;
 typedef struct OptionResultDef OptionResultDef;
 
+/* ── v0.7 Generic & Interface state ────────────────────────────────────── */
+
+/* Active type-param substitution context (set during monomorphization) */
+static const char *g_sub_params[8];
+static const char *g_sub_types[8];
+static int         g_sub_count = 0;
+
+/* Generic function registry (templates found in the program) */
+static Node  *g_gfn_decls[64];
+static char  *g_gfn_names[64];
+static int    g_gfn_count = 0;
+
+/* Generic struct registry */
+static Node  *g_gst_decls[64];
+static char  *g_gst_names[64];
+static int    g_gst_count = 0;
+
+typedef struct GenFnInst GenFnInst;
+struct GenFnInst {
+    Node        *decl;
+    char         mangled[256];   /* e.g. "max_i32" */
+    const char  *c_type;         /* C type string, e.g. "int32_t" */
+    const char  *ns_type;        /* NightScript type name, e.g. "i32" */
+    GenFnInst   *next;
+};
+static GenFnInst *g_gfn_insts = NULL;
+
+typedef struct GenStInst GenStInst;
+struct GenStInst {
+    Node        *decl;
+    char         ns_name[256];  /* "Vec[i32]" */
+    char         mangled[256];  /* "Vec_i32" */
+    const char  *c_types[8];
+    const char  *ns_types[8];
+    int          type_count;
+    GenStInst   *next;
+};
+static GenStInst *g_gst_insts = NULL;
+
 struct SliceDef {
     char     *name;
     Node     *type;
@@ -265,6 +304,263 @@ recurse_option:
     free(right);
 }
 
+/* ── v0.7 helper functions ──────────────────────────────────────────────── */
+
+/* Map NightScript type name to C type string */
+static const char *ns_to_c(const char *ns) {
+    if (!ns) return "void";
+    if (!strcmp(ns,"i8"))    return "int8_t";
+    if (!strcmp(ns,"i16"))   return "int16_t";
+    if (!strcmp(ns,"i32"))   return "int32_t";
+    if (!strcmp(ns,"i64"))   return "int64_t";
+    if (!strcmp(ns,"isize")) return "ptrdiff_t";
+    if (!strcmp(ns,"u8"))    return "uint8_t";
+    if (!strcmp(ns,"u16"))   return "uint16_t";
+    if (!strcmp(ns,"u32"))   return "uint32_t";
+    if (!strcmp(ns,"u64"))   return "uint64_t";
+    if (!strcmp(ns,"usize")) return "size_t";
+    if (!strcmp(ns,"f32"))   return "float";
+    if (!strcmp(ns,"f64"))   return "double";
+    if (!strcmp(ns,"bool"))  return "bool";
+    if (!strcmp(ns,"char"))  return "char";
+    if (!strcmp(ns,"void"))  return "void";
+    if (!strcmp(ns,"str"))   return "NStr";
+    if (!strcmp(ns,"cstr"))  return "const char*";
+    return ns; /* user-defined type: return as-is */
+}
+
+/* Check if name is a type param in current substitution context */
+static const char *gen_subst_lookup(const char *name) {
+    for (int i = 0; i < g_sub_count; i++)
+        if (!strcmp(name, g_sub_params[i])) return g_sub_types[i];
+    return NULL;
+}
+
+/* Build mangled name: base + "_" + sanitized(type_arg) */
+static void gen_mangle(char *out, size_t sz, const char *base, const char *type_arg) {
+    size_t len = 0;
+    /* copy base */
+    while (*base && len < sz-2) out[len++] = *base++;
+    out[len] = '\0';
+    /* append _ + sanitized type_arg */
+    if (type_arg && len < sz-2) {
+        out[len++] = '_'; out[len] = '\0';
+        while (*type_arg && len < sz-2) {
+            char c = *type_arg++;
+            if ((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')) out[len++]=c;
+            else out[len++]='_';
+        }
+        out[len] = '\0';
+    }
+    /* strip trailing underscores */
+    while (len > 0 && out[len-1]=='_') out[--len]='\0';
+}
+
+/* Format generic type name to C identifier: "Vec[i32]" → "Vec_i32" */
+static void format_generic_mangled(const char *ns_name, char *buf, size_t sz) {
+    buf[0] = '\0';
+    append_sanitized(buf, sz, ns_name);
+    /* strip trailing underscores */
+    size_t len = strlen(buf);
+    while (len > 0 && buf[len-1]=='_') buf[--len]='\0';
+}
+
+/* Find or register a generic function instantiation */
+static GenFnInst *gen_fn_find_or_add(Node *decl, const char *fn_name,
+                                      const char *c_type, const char *ns_type) {
+    char mangled[256];
+    gen_mangle(mangled, sizeof(mangled), fn_name, c_type);
+    for (GenFnInst *it = g_gfn_insts; it; it = it->next)
+        if (!strcmp(it->mangled, mangled)) return it;
+    GenFnInst *inst = calloc(1, sizeof(GenFnInst));
+    if (!inst) return NULL;
+    inst->decl    = decl;
+    inst->c_type  = c_type;
+    inst->ns_type = ns_type;
+    strncpy(inst->mangled, mangled, sizeof(inst->mangled)-1);
+    inst->next    = g_gfn_insts;
+    g_gfn_insts   = inst;
+    return inst;
+}
+
+/* Find or register a generic struct instantiation */
+static GenStInst *gen_st_find_or_add(Node *decl, const char *ns_name,
+                                      const char **c_types, const char **ns_types, int n) {
+    char mangled[256];
+    format_generic_mangled(ns_name, mangled, sizeof(mangled));
+    for (GenStInst *it = g_gst_insts; it; it = it->next)
+        if (!strcmp(it->ns_name, ns_name)) return it;
+    GenStInst *inst = calloc(1, sizeof(GenStInst));
+    if (!inst) return NULL;
+    inst->decl = decl;
+    inst->type_count = n < 8 ? n : 8;
+    strncpy(inst->ns_name, ns_name, sizeof(inst->ns_name)-1);
+    strncpy(inst->mangled, mangled, sizeof(inst->mangled)-1);
+    for (int i = 0; i < inst->type_count; i++) {
+        inst->c_types[i]  = c_types[i];
+        inst->ns_types[i] = ns_types[i];
+    }
+    inst->next    = g_gst_insts;
+    g_gst_insts   = inst;
+    return inst;
+}
+
+/* Extract inner type string from "Name[inner]" or "Name[a, b]" */
+static char *gen_extract_inner(const char *ns_name) {
+    const char *lb = strchr(ns_name, '[');
+    if (!lb) return NULL;
+    const char *rb = strrchr(ns_name, ']');
+    if (!rb || rb <= lb+1) return NULL;
+    size_t len = (size_t)(rb - lb - 1);
+    char *inner = malloc(len+1);
+    if (!inner) return NULL;
+    memcpy(inner, lb+1, len);
+    inner[len] = '\0';
+    return inner;
+}
+
+/* Pre-scan a type node for generic struct instantiations */
+static void prescan_type(Node *type) {
+    if (!type) return;
+    switch (type->kind) {
+    case NODE_TYPE_NAMED: {
+        const char *name = type->as.type_named.name;
+        for (int gi = 0; gi < g_gst_count; gi++) {
+            if (type_name_has_form(name, g_gst_names[gi])) {
+                char *inner = gen_extract_inner(name);
+                if (inner) {
+                    const char *c_t  = ns_to_c(inner);
+                    const char *ns_t = inner;
+                    gen_st_find_or_add(g_gst_decls[gi], name, &c_t, &ns_t, 1);
+                    free(inner);
+                }
+                break;
+            }
+        }
+        break;
+    }
+    case NODE_TYPE_POINTER: prescan_type(type->as.type_ptr.inner); break;
+    case NODE_TYPE_ARRAY:   prescan_type(type->as.type_array.elem); break;
+    default: break;
+    }
+}
+
+/* Pre-scan an expression node for generic function calls */
+static void prescan_expr(Node *n);
+static void prescan_stmt(Node *n);
+
+static void prescan_expr(Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+    case NODE_CALL:
+        /* Detect fn[TypeArg](args) → NODE_CALL{callee=INDEX{obj=IDENT,idx=type}} */
+        if (n->as.call.callee && n->as.call.callee->kind == NODE_INDEX) {
+            Node *idx = n->as.call.callee;
+            Node *obj = idx->as.index_expr.object;
+            Node *ta  = idx->as.index_expr.index;
+            if (obj && obj->kind == NODE_IDENT && ta) {
+                const char *fn_name = obj->as.ident.name;
+                for (int i = 0; i < g_gfn_count; i++) {
+                    if (!strcmp(g_gfn_names[i], fn_name)) {
+                        const char *ns_t = NULL;
+                        if (ta->kind == NODE_IDENT)       ns_t = ta->as.ident.name;
+                        else if (ta->kind == NODE_TYPE_NAMED) ns_t = ta->as.type_named.name;
+                        if (ns_t)
+                            gen_fn_find_or_add(g_gfn_decls[i], fn_name, ns_to_c(ns_t), ns_t);
+                        break;
+                    }
+                }
+            }
+        }
+        prescan_expr(n->as.call.callee);
+        for (int i = 0; i < n->as.call.args.count; i++)
+            prescan_expr(n->as.call.args.items[i]);
+        break;
+    case NODE_BINARY:
+        prescan_expr(n->as.binary.left);
+        prescan_expr(n->as.binary.right);
+        break;
+    case NODE_UNARY:
+        prescan_expr(n->as.unary.operand);
+        break;
+    case NODE_ASSIGN:
+        prescan_expr(n->as.assign.target);
+        prescan_expr(n->as.assign.value);
+        break;
+    case NODE_FIELD:
+        prescan_expr(n->as.field.object);
+        break;
+    case NODE_INDEX:
+        prescan_expr(n->as.index_expr.object);
+        prescan_expr(n->as.index_expr.index);
+        break;
+    case NODE_CAST:
+        prescan_expr(n->as.cast.expr);
+        break;
+    default: break;
+    }
+}
+
+static void prescan_stmt(Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+    case NODE_BLOCK:
+        for (int i = 0; i < n->as.block.stmts.count; i++)
+            prescan_stmt(n->as.block.stmts.items[i]);
+        break;
+    case NODE_RETURN:    prescan_expr(n->as.ret.value); break;
+    case NODE_LET:
+        prescan_type(n->as.let.type);
+        prescan_expr(n->as.let.value);
+        break;
+    case NODE_EXPR_STMT: prescan_expr(n->as.expr_stmt.expr); break;
+    case NODE_DEFER:     prescan_expr(n->as.defer_stmt.expr); break;
+    case NODE_IF:
+        prescan_expr(n->as.if_stmt.cond);
+        prescan_stmt(n->as.if_stmt.then_block);
+        prescan_stmt(n->as.if_stmt.else_node);
+        break;
+    case NODE_WHILE:
+        prescan_expr(n->as.while_stmt.cond);
+        prescan_stmt(n->as.while_stmt.body);
+        break;
+    case NODE_FOR:
+        prescan_stmt(n->as.for_stmt.init);
+        prescan_expr(n->as.for_stmt.cond);
+        prescan_expr(n->as.for_stmt.post);
+        prescan_stmt(n->as.for_stmt.body);
+        break;
+    case NODE_LOOP:
+    case NODE_UNSAFE:
+        prescan_stmt(n->as.loop_stmt.body);
+        break;
+    default: break;
+    }
+}
+
+static void prescan_program(Node *prog) {
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        Node *d = prog->as.program.decls.items[i];
+        if (d->kind == NODE_FN_DECL && d->as.fn.type_params.count == 0) {
+            /* scan param types and return type for generic struct usage */
+            for (int j = 0; j < d->as.fn.params.count; j++)
+                prescan_type(d->as.fn.params.items[j]->as.let.type);
+            prescan_type(d->as.fn.ret_type);
+            if (d->as.fn.body) prescan_stmt(d->as.fn.body);
+        } else if (d->kind == NODE_IMPL_DECL) {
+            for (int j = 0; j < d->as.impl.methods.count; j++) {
+                Node *m = d->as.impl.methods.items[j];
+                for (int k = 0; k < m->as.fn.params.count; k++)
+                    prescan_type(m->as.fn.params.items[k]->as.let.type);
+                prescan_type(m->as.fn.ret_type);
+                if (m->as.fn.body) prescan_stmt(m->as.fn.body);
+            }
+        }
+    }
+}
+
+/* ── end v0.7 helpers ───────────────────────────────────────────────────── */
+
 static void append_type_mangle(Node *type, char *buf, size_t size) {
     if (!type) {
         append_text(buf, size, "void");
@@ -272,9 +568,14 @@ static void append_type_mangle(Node *type, char *buf, size_t size) {
     }
 
     switch (type->kind) {
-        case NODE_TYPE_NAMED:
-            append_sanitized(buf, size, type->as.type_named.name);
+        case NODE_TYPE_NAMED: {
+            const char *tn = type->as.type_named.name;
+            /* Check active generic substitution */
+            const char *sub = gen_subst_lookup(tn);
+            if (sub) { append_sanitized(buf, size, sub); return; }
+            append_sanitized(buf, size, tn);
             return;
+        }
         case NODE_TYPE_POINTER:
             append_text(buf, size, "ptr_");
             if (type->as.type_ptr.is_const)
@@ -659,7 +960,10 @@ static void emit_type_left(COut *o, Node *t) {
     switch (t->kind) {
         case NODE_TYPE_NAMED: {
             const char *name = t->as.type_named.name;
-            /* primitive type mapping */
+            /* 1. Check generic type-param substitution */
+            const char *sub = gen_subst_lookup(name);
+            if (sub) { emit(o, "%s", sub); break; }
+            /* 2. Primitive type mapping */
             if      (!strcmp(name, "i8"))    emit(o, "int8_t");
             else if (!strcmp(name, "i16"))   emit(o, "int16_t");
             else if (!strcmp(name, "i32"))   emit(o, "int32_t");
@@ -684,7 +988,26 @@ static void emit_type_left(COut *o, Node *t) {
                 format_option_result_type_name(name, c_name, sizeof(c_name));
                 emit(o, "%s", c_name);
             } else {
-                emit(o, "%s", name);
+                /* 3. Check generic struct instantiation: "Vec[i32]" → "Vec_i32" */
+                int is_gen_struct = 0;
+                for (int gi = 0; gi < g_gst_count; gi++) {
+                    if (type_name_has_form(name, g_gst_names[gi])) {
+                        char mangled[256];
+                        format_generic_mangled(name, mangled, sizeof(mangled));
+                        emit(o, "%s", mangled);
+                        /* Collect instantiation for later emission */
+                        char *inner = gen_extract_inner(name);
+                        if (inner) {
+                            const char *c_t  = ns_to_c(inner);
+                            const char *ns_t = inner; /* use as-is for ns type */
+                            gen_st_find_or_add(g_gst_decls[gi], name, &c_t, &ns_t, 1);
+                            free(inner);
+                        }
+                        is_gen_struct = 1;
+                        break;
+                    }
+                }
+                if (!is_gen_struct) emit(o, "%s", name);
             }
             break;
         }
@@ -918,9 +1241,10 @@ static Node *find_decl_named(Node *program, NodeKind kind, const char *name) {
             continue;
 
         const char *decl_name = NULL;
-        if (kind == NODE_STRUCT_DECL) decl_name = decl->as.struct_decl.name;
-        if (kind == NODE_ENUM_DECL)   decl_name = decl->as.enum_decl.name;
-        if (kind == NODE_UNION_DECL)  decl_name = decl->as.union_decl.name;
+        if (kind == NODE_STRUCT_DECL)    decl_name = decl->as.struct_decl.name;
+        if (kind == NODE_ENUM_DECL)      decl_name = decl->as.enum_decl.name;
+        if (kind == NODE_UNION_DECL)     decl_name = decl->as.union_decl.name;
+        if (kind == NODE_INTERFACE_DECL) decl_name = decl->as.interface_decl.name;
         if (decl_name && !strcmp(decl_name, name))
             return decl;
     }
@@ -2208,6 +2532,39 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
                 break;
             }
 
+            /* Generic fn[T](args) → mangled_fn(args) */
+            if (n->as.call.callee && n->as.call.callee->kind == NODE_INDEX) {
+                Node *idx_n = n->as.call.callee;
+                Node *fn_obj = idx_n->as.index_expr.object;
+                Node *type_arg = idx_n->as.index_expr.index;
+                if (fn_obj && fn_obj->kind == NODE_IDENT && type_arg) {
+                    int found_gfn = 0;
+                    for (int gi = 0; gi < g_gfn_count; gi++) {
+                        if (!strcmp(g_gfn_names[gi], fn_obj->as.ident.name)) {
+                            found_gfn = 1; break;
+                        }
+                    }
+                    if (found_gfn) {
+                        const char *ns_t = NULL;
+                        if (type_arg->kind == NODE_IDENT)
+                            ns_t = type_arg->as.ident.name;
+                        else if (type_arg->kind == NODE_TYPE_NAMED)
+                            ns_t = type_arg->as.type_named.name;
+                        if (ns_t) {
+                            char mangled[256];
+                            gen_mangle(mangled, sizeof(mangled),
+                                       fn_obj->as.ident.name, ns_to_c(ns_t));
+                            emit(o, "%s(", mangled);
+                            for (int ai = 0; ai < n->as.call.args.count; ai++) {
+                                if (ai) emit(o, ", ");
+                                emit_expr(o, cg, n->as.call.args.items[ai]);
+                            }
+                            emit(o, ")");
+                            break;
+                        }
+                    }
+                }
+            }
             emit_expr(o, cg, n->as.call.callee);
             emit(o, "(");
             for (int i = 0; i < n->as.call.args.count; i++) {
@@ -2298,7 +2655,19 @@ static void emit_expr_typed(COut *o, CGContext *cg, Node *n, Node *expected_type
             emit_slice_expr(o, cg, n);
             break;
         case NODE_STRUCT_LIT: {
-            emit(o, "(%s){", n->as.struct_lit.type_name);
+            const char *slt_name = n->as.struct_lit.type_name;
+            int slt_generic = 0;
+            for (int gi = 0; gi < g_gst_count; gi++) {
+                if (type_name_has_form(slt_name, g_gst_names[gi])) {
+                    char slt_mangled[256];
+                    format_generic_mangled(slt_name, slt_mangled, sizeof(slt_mangled));
+                    emit(o, "(%s){", slt_mangled);
+                    slt_generic = 1;
+                    break;
+                }
+            }
+            if (!slt_generic)
+                emit(o, "(%s){", slt_name);
             for (int i = 0; i < n->as.struct_lit.count; i++) {
                 if (i) emit(o, ", ");
                 emit(o, ".%s = ", n->as.struct_lit.field_names[i]);
@@ -2733,6 +3102,39 @@ static void emit_standard_headers(COut *o, Node *prog) {
     emit(o, "\n");
 }
 
+/* emit one monomorphized generic function body */
+static void emit_gen_fn_inst(COut *o, CGContext *cg_parent, GenFnInst *inst) {
+    Node *gd = inst->decl;
+    if (!gd->as.fn.body) return;
+    int tp_count = gd->as.fn.type_params.count;
+    g_sub_count = tp_count < 8 ? tp_count : 8;
+    for (int i = 0; i < g_sub_count && i < 1; i++) {
+        g_sub_params[i] = gd->as.fn.type_params.items[i]->as.type_named.name;
+        g_sub_types[i]  = inst->c_type;
+    }
+    emit(o, "\n");
+    emit_fn_sig(o, inst->mangled, &gd->as.fn.params, gd->as.fn.ret_type);
+    emit(o, "\n");
+    CGContext cg;
+    memset(&cg, 0, sizeof(cg));
+    cg.program = cg_parent->program;
+    cg.defer_count = 0;
+    cg.current_return_type = gd->as.fn.ret_type;
+    cg_push_scope(&cg);
+    for (int j = 0; j < gd->as.fn.params.count; j++) {
+        Node *param = gd->as.fn.params.items[j];
+        cg_define(&cg, param->as.let.name, param->as.let.type);
+    }
+    emit_block(o, &cg, gd->as.fn.body);
+    cg_pop_scope(&cg);
+    cg_free_temps(&cg);
+    free(cg.defers);
+    free(cg.scope_defer_markers.items);
+    free(cg.loop_defer_markers.items);
+    emit(o, "\n");
+    g_sub_count = 0;
+}
+
 /* pass 1: struct / enum / union definitions */
 static void emit_type_definitions(COut *o, Node *prog) {
     SliceDef *slice_defs = NULL;
@@ -2743,6 +3145,7 @@ static void emit_type_definitions(COut *o, Node *prog) {
         Node *d = prog->as.program.decls.items[i];
 
         if (d->kind == NODE_STRUCT_DECL) {
+            if (d->as.struct_decl.type_params.count > 0) continue; /* skip generic template */
             emit(o, "typedef struct %s %s;\n", d->as.struct_decl.name, d->as.struct_decl.name);
             emitted_forward = 1;
         }
@@ -2754,6 +3157,14 @@ static void emit_type_definitions(COut *o, Node *prog) {
 
         if (d->kind == NODE_ENUM_DECL && enum_is_data_carrying(d)) {
             emit(o, "typedef struct %s %s;\n", d->as.enum_decl.name, d->as.enum_decl.name);
+            emitted_forward = 1;
+        }
+
+        if (d->kind == NODE_INTERFACE_DECL) {
+            emit(o, "typedef struct %s_vtable %s_vtable;\n",
+                 d->as.interface_decl.name, d->as.interface_decl.name);
+            emit(o, "typedef struct %s %s;\n",
+                 d->as.interface_decl.name, d->as.interface_decl.name);
             emitted_forward = 1;
         }
     }
@@ -2835,6 +3246,7 @@ static void emit_type_definitions(COut *o, Node *prog) {
         Node *d = prog->as.program.decls.items[i];
 
         if (d->kind == NODE_STRUCT_DECL) {
+            if (d->as.struct_decl.type_params.count > 0) continue; /* skip generic template */
             emit(o, "struct %s {\n", d->as.struct_decl.name);
             for (int j = 0; j < d->as.struct_decl.fields.count; j++) {
                 Node *f = d->as.struct_decl.fields.items[j];
@@ -2914,6 +3326,55 @@ static void emit_type_definitions(COut *o, Node *prog) {
 
     free_slice_defs(slice_defs);
     free_option_result_defs(option_result_defs);
+
+    /* interface vtable structs + fat pointer structs */
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        Node *d = prog->as.program.decls.items[i];
+        if (d->kind != NODE_INTERFACE_DECL) continue;
+        const char *iname = d->as.interface_decl.name;
+        emit(o, "struct %s_vtable {\n", iname);
+        for (int j = 0; j < d->as.interface_decl.methods.count; j++) {
+            Node *m = d->as.interface_decl.methods.items[j];
+            emit(o, "    ");
+            emit_type_left(o, m->as.fn.ret_type);
+            emit(o, " (*%s)(void*", m->as.fn.name);
+            for (int k = 1; k < m->as.fn.params.count; k++) {
+                Node *p = m->as.fn.params.items[k];
+                emit(o, ", ");
+                emit_typed_name(o, p->as.let.type, p->as.let.name);
+            }
+            emit(o, ");\n");
+        }
+        emit(o, "};\n\n");
+        emit(o, "struct %s {\n", iname);
+        emit(o, "    void *data;\n");
+        emit(o, "    const %s_vtable *vtbl;\n", iname);
+        emit(o, "};\n\n");
+    }
+
+    /* generic struct instantiations */
+    for (GenStInst *gi = g_gst_insts; gi; gi = gi->next) {
+        Node *gd = gi->decl;
+        int tp_count = gd->as.struct_decl.type_params.count;
+        g_sub_count = gi->type_count < tp_count ? gi->type_count : tp_count;
+        for (int i = 0; i < g_sub_count; i++) {
+            g_sub_params[i] = gd->as.struct_decl.type_params.items[i]->as.type_named.name;
+            g_sub_types[i]  = gi->c_types[i];
+        }
+        emit(o, "typedef struct %s %s;\n", gi->mangled, gi->mangled);
+        emit(o, "struct %s {\n", gi->mangled);
+        for (int j = 0; j < gd->as.struct_decl.fields.count; j++) {
+            Node *f = gd->as.struct_decl.fields.items[j];
+            emit(o, "    ");
+            emit_typed_name(o, f->as.let.type, f->as.let.name);
+            emit(o, ";\n");
+        }
+        if (gd->as.struct_decl.is_packed)
+            emit(o, "} __attribute__((packed));\n\n");
+        else
+            emit(o, "};\n\n");
+        g_sub_count = 0;
+    }
 }
 
 /* pass 2: function prototypes */
@@ -2944,6 +3405,7 @@ static void emit_prototypes(COut *o, Node *prog) {
         }
 
         if (d->kind == NODE_FN_DECL) {
+            if (d->as.fn.type_params.count > 0) continue; /* skip generic template */
             make_c_name(cname, sizeof(cname), d->as.fn.owner_type, d->as.fn.name);
             int is_ep = !d->as.fn.owner_type &&
                         !strcmp(d->as.fn.name, "main") &&
@@ -2963,7 +3425,42 @@ static void emit_prototypes(COut *o, Node *prog) {
                 emit_fn_sig(o, cname, &m->as.fn.params, m->as.fn.ret_type);
                 emit(o, ";\n");
             }
+            /* coercion fn prototype for interface impl */
+            if (d->as.impl.interface_name) {
+                emit(o, "%s %s_as_%s(%s *self);\n",
+                     d->as.impl.interface_name, d->as.impl.target,
+                     d->as.impl.interface_name, d->as.impl.target);
+            }
         }
+
+        if (d->kind == NODE_COMPTIME) {
+            for (int j = 0; j < d->as.comptime_block.decls.count; j++) {
+                Node *cn = d->as.comptime_block.decls.items[j];
+                if (cn->kind != NODE_CONST) continue;
+                COut tmp;
+                tmp.buf = malloc(256); tmp.len = 0; tmp.cap = 256; tmp.indent = 0;
+                if (tmp.buf) {
+                    tmp.buf[0] = '\0';
+                    CGContext cg0 = { .program = prog };
+                    emit_expr(&tmp, &cg0, cn->as.konst.value);
+                    emit(o, "#define %s (%s)\n", cn->as.konst.name, tmp.buf);
+                    free(tmp.buf);
+                }
+            }
+        }
+    }
+    /* forward decls for generic fn instantiations */
+    for (GenFnInst *gi = g_gfn_insts; gi; gi = gi->next) {
+        Node *gd = gi->decl;
+        int tp_count = gd->as.fn.type_params.count;
+        g_sub_count = tp_count < 8 ? tp_count : 8;
+        for (int i = 0; i < g_sub_count && i < 1; i++) {
+            g_sub_params[i] = gd->as.fn.type_params.items[i]->as.type_named.name;
+            g_sub_types[i]  = gi->c_type;
+        }
+        emit_fn_sig(o, gi->mangled, &gd->as.fn.params, gd->as.fn.ret_type);
+        emit(o, ";\n");
+        g_sub_count = 0;
     }
 }
 
@@ -2976,6 +3473,7 @@ static void emit_definitions(COut *o, Node *prog) {
         Node *d = prog->as.program.decls.items[i];
 
         if (d->kind == NODE_FN_DECL) {
+            if (d->as.fn.type_params.count > 0) continue; /* skip generic template */
             make_c_name(cname, sizeof(cname), d->as.fn.owner_type, d->as.fn.name);
             int is_entry = !d->as.fn.owner_type &&
                            !strcmp(d->as.fn.name, "main") &&
@@ -3038,6 +3536,29 @@ static void emit_definitions(COut *o, Node *prog) {
                 cg_pop_scope(&cg);
                 emit(o, "\n");
             }
+            /* interface impl: emit vtable instance + coercion fn */
+            if (d->as.impl.interface_name) {
+                Node *iface = find_decl_named(cg.program, NODE_INTERFACE_DECL,
+                                              d->as.impl.interface_name);
+                if (iface) {
+                    const char *iname = d->as.impl.interface_name;
+                    const char *tname = d->as.impl.target;
+                    emit(o, "\nstatic const %s_vtable %s_%s_vtable = {\n", iname, tname, iname);
+                    for (int j = 0; j < iface->as.interface_decl.methods.count; j++) {
+                        Node *m = iface->as.interface_decl.methods.items[j];
+                        /* cast to the actual vtable fn ptr type, matching the struct field */
+                        emit(o, "    .%s = (", m->as.fn.name);
+                        emit_type_left(o, m->as.fn.ret_type);
+                        emit(o, " (*)(void*))%s_%s,\n", tname, m->as.fn.name);
+                    }
+                    emit(o, "};\n\n");
+                    emit(o, "%s %s_as_%s(%s *self)\n", iname, tname, iname, tname);
+                    emit(o, "{\n");
+                    emit(o, "    return (%s){ .data = self, .vtbl = &%s_%s_vtable };\n",
+                         iname, tname, iname);
+                    emit(o, "}\n");
+                }
+            }
         }
 
         if (d->kind == NODE_KERNEL_APP) {
@@ -3060,6 +3581,10 @@ static void emit_definitions(COut *o, Node *prog) {
             }
         }
     }
+    /* emit monomorphized generic fn bodies */
+    for (GenFnInst *gi = g_gfn_insts; gi; gi = gi->next)
+        emit_gen_fn_inst(o, &cg, gi);
+
     cg_free_temps(&cg);
     free(cg.defers);
     free(cg.scope_defer_markers.items);
@@ -4819,6 +5344,33 @@ int codegen_generate(Node *program, COut *out) {
     }
     if (has_ui_app(program))
         emit(out, "#include <SDL2/SDL.h>\n\n");
+
+    /* ── v0.7: build generic registries + prescan ── */
+    g_sub_count = 0;
+    g_gfn_count = 0;
+    g_gst_count = 0;
+    for (GenFnInst *gi = g_gfn_insts; gi; ) { GenFnInst *nx = gi->next; free(gi); gi = nx; }
+    g_gfn_insts = NULL;
+    for (GenStInst *gi = g_gst_insts; gi; ) { GenStInst *nx = gi->next; free(gi); gi = nx; }
+    g_gst_insts = NULL;
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        if (d->kind == NODE_FN_DECL && d->as.fn.type_params.count > 0 &&
+                g_gfn_count < 64) {
+            g_gfn_decls[g_gfn_count] = d;
+            g_gfn_names[g_gfn_count] = d->as.fn.name;
+            g_gfn_count++;
+        }
+        if (d->kind == NODE_STRUCT_DECL && d->as.struct_decl.type_params.count > 0 &&
+                g_gst_count < 64) {
+            g_gst_decls[g_gst_count] = d;
+            g_gst_names[g_gst_count] = d->as.struct_decl.name;
+            g_gst_count++;
+        }
+    }
+    prescan_program(program);
+    /* ── end v0.7 setup ── */
+
     emit_type_definitions(out, program);
     if (!is_kernel) {
         emit_stdlib_runtime(out);

@@ -297,7 +297,8 @@ static int is_known_type(Analyzer *a, const char *name) {
     return is_builtin_type(name) ||
            find_named_decl(a->structs, a->struct_count, name) ||
            find_named_decl(a->enums, a->enum_count, name) ||
-           find_named_decl(a->unions, a->union_count, name);
+           find_named_decl(a->unions, a->union_count, name) ||
+           find_named_decl(a->interfaces, a->interface_count, name);
 }
 
 static int is_identifier_like_name(const char *name);
@@ -379,6 +380,22 @@ static int validate_type_name(Analyzer *a, const char *name) {
         return ok;
     }
 
+    /* generic struct type like "Pair[i32]" — check base name is a generic struct */
+    {
+        const char *lb = strchr(name, '[');
+        if (lb && name[strlen(name)-1] == ']') {
+            size_t base_len = (size_t)(lb - name);
+            char base[256];
+            if (base_len < sizeof(base)) {
+                memcpy(base, name, base_len);
+                base[base_len] = '\0';
+                NamedDecl *nd = find_named_decl(a->structs, a->struct_count, base);
+                if (nd && nd->node &&
+                    nd->node->as.struct_decl.type_params.count > 0)
+                    return 1;
+            }
+        }
+    }
     return is_identifier_like_name(name) && is_known_type(a, name);
 }
 
@@ -705,6 +722,13 @@ static int register_impl_decl(Analyzer *a, Node *decl) {
         }
         if (!check_impl_satisfies_interface(a, decl, iface_entry->node))
             return 0;
+        /* register generated coercion fn as a global name: Target_as_Interface */
+        {
+            char coerce_name[256];
+            snprintf(coerce_name, sizeof(coerce_name), "%s_as_%s",
+                     decl->as.impl.target, decl->as.impl.interface_name);
+            register_global_name(a, dup_string(coerce_name), decl);
+        }
     }
 
     return 1;
@@ -843,6 +867,20 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
                    analyze_expr(a, scope, expr->as.assign.value);
 
         case NODE_INDEX:
+            /* generic fn[TypeArg] pattern: skip type arg validation */
+            if (expr->as.index_expr.object &&
+                expr->as.index_expr.object->kind == NODE_IDENT) {
+                const char *fn_nm = expr->as.index_expr.object->as.ident.name;
+                int is_gfn = 0;
+                for (int gi = 0; gi < a->global_name_count && !is_gfn; gi++) {
+                    if (!strcmp(a->global_names[gi], fn_nm) &&
+                        !find_named_decl(a->functions, a->function_count, fn_nm) &&
+                        !find_named_decl(a->extern_functions, a->extern_function_count, fn_nm))
+                        is_gfn = 1;
+                }
+                if (is_gfn)
+                    return analyze_expr(a, scope, expr->as.index_expr.object);
+            }
             return analyze_expr(a, scope, expr->as.index_expr.object) &&
                    analyze_expr(a, scope, expr->as.index_expr.index);
 
@@ -896,13 +934,26 @@ static int analyze_expr(Analyzer *a, Scope *scope, Node *expr) {
             return analyze_expr(a, scope, expr->as.field.object);
 
         case NODE_STRUCT_LIT: {
-            NamedDecl *decl = find_named_decl(a->structs, a->struct_count, expr->as.struct_lit.type_name);
+            const char *slt_name = expr->as.struct_lit.type_name;
+            NamedDecl *decl = find_named_decl(a->structs, a->struct_count, slt_name);
             if (!decl)
-                decl = find_named_decl(a->unions, a->union_count, expr->as.struct_lit.type_name);
-
+                decl = find_named_decl(a->unions, a->union_count, slt_name);
+            /* generic struct: "Pair[i32]" → look up by base name "Pair" */
+            if (!decl) {
+                const char *lb = strchr(slt_name, '[');
+                if (lb && slt_name[strlen(slt_name)-1] == ']') {
+                    size_t base_len = (size_t)(lb - slt_name);
+                    char base[256];
+                    if (base_len < sizeof(base)) {
+                        memcpy(base, slt_name, base_len);
+                        base[base_len] = '\0';
+                        decl = find_named_decl(a->structs, a->struct_count, base);
+                    }
+                }
+            }
             if (!decl) {
                 sema_error(a, expr->line, expr->col,
-                           "unknown composite type '%s'", expr->as.struct_lit.type_name);
+                           "unknown composite type '%s'", slt_name);
                 return 0;
             }
 
@@ -1257,6 +1308,8 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
 
         switch (decl->kind) {
             case NODE_STRUCT_DECL:
+                /* skip field validation for generic templates */
+                if (decl->as.struct_decl.type_params.count > 0) break;
                 if (!validate_fields(&a, &decl->as.struct_decl.fields, "struct"))
                     a.had_error = 1;
                 break;
@@ -1279,6 +1332,14 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
             if (!register_interface_decl(&a, decl))
                 a.had_error = 1;
         }
+        if (decl->kind == NODE_COMPTIME) {
+            /* register comptime consts as global names */
+            for (int j = 0; j < decl->as.comptime_block.decls.count && !a.had_error; j++) {
+                Node *cn = decl->as.comptime_block.decls.items[j];
+                if (cn->kind == NODE_CONST)
+                    register_global_name(&a, cn->as.konst.name, cn);
+            }
+        }
     }
 
     for (int i = 0; i < program->as.program.decls.count && !a.had_error; i++) {
@@ -1286,6 +1347,11 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
 
         switch (decl->kind) {
             case NODE_FN_DECL:
+                if (decl->as.fn.type_params.count > 0) {
+                    /* generic template: just register name so calls don't error */
+                    register_global_name(&a, decl->as.fn.name, decl);
+                    break;
+                }
                 if (!register_function_like(&a, decl, 0)) {
                     if (!a.had_error)
                         sema_error(&a, decl->line, decl->col, "out of memory");
@@ -1318,6 +1384,8 @@ int sema_analyze(Node *program, const char *source_name, SemanticModel *out) {
         Node *decl = program->as.program.decls.items[i];
 
         if (decl->kind == NODE_FN_DECL) {
+            /* skip body analysis for generic templates — checked at instantiation */
+            if (decl->as.fn.type_params.count > 0) continue;
             if (!analyze_function_body(&a, decl))
                 a.had_error = 1;
         } else if (decl->kind == NODE_IMPL_DECL) {
