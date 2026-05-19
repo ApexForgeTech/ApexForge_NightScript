@@ -14,6 +14,12 @@
 #include "typeck/typeck.h"
 #include "codegen/codegen.h"
 
+#ifdef NIGHT_LLVM_BACKEND
+#include "llvmgen/llvmgen.h"
+#endif
+
+static int g_use_llvm_backend = 0;
+
 typedef enum {
     CMD_CODEGEN,
     CMD_AST,
@@ -1238,11 +1244,13 @@ static int compile_source(const char *path, CompileState *state) {
     if (!typeck_check(state->ast, &state->sema, path))
         return 0;
 
-    if (!codegen_generate(state->ast, &state->codegen)) {
-        fprintf(stderr, "codegen failed\n");
-        return 0;
+    if (!g_use_llvm_backend) {
+        if (!codegen_generate(state->ast, &state->codegen)) {
+            fprintf(stderr, "codegen failed\n");
+            return 0;
+        }
+        state->codegen_ready = 1;
     }
-    state->codegen_ready = 1;
     return 1;
 }
 
@@ -1331,6 +1339,22 @@ static int build_binary(const char *src_path, const char *binary_path,
 
     if (!compile_source(src_path, &state))
         return 1;
+
+#ifdef NIGHT_LLVM_BACKEND
+    if (g_use_llvm_backend) {
+        int opt = 0;
+        if (opt_flags && (strstr(opt_flags, "-O2") || strstr(opt_flags, "-O3")))
+            opt = 2;
+        LLVMGenOptions llvm_opts = {
+            .target_triple = NULL,
+            .opt_level     = opt,
+            .emit_ir       = 0,
+        };
+        int rc = llvmgen_generate(state.ast, binary_path, &llvm_opts) ? 0 : 1;
+        compile_state_free(&state);
+        return rc;
+    }
+#endif
 
     /* build extra flags: opt_flags + SDL2 if UI, freestanding if kernel */
     {
@@ -1474,6 +1498,35 @@ int main(int argc, char **argv) {
             }
             target_arch = argv[argi + 1];
             argi += 2;
+            continue;
+        }
+
+        if (!strcmp(argv[argi], "--backend")) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "error: expected backend name after --backend\n");
+                return 1;
+            }
+            const char *bname = argv[argi + 1];
+            if (!strcmp(bname, "llvm")) {
+#ifdef NIGHT_LLVM_BACKEND
+                g_use_llvm_backend = 1;
+#else
+                fprintf(stderr, "error: LLVM backend not compiled in\n");
+                return 1;
+#endif
+            } else if (!strcmp(bname, "c")) {
+                g_use_llvm_backend = 0;
+            } else {
+                fprintf(stderr, "error: unknown backend '%s' (choices: c, llvm)\n", bname);
+                return 1;
+            }
+            argi += 2;
+            continue;
+        }
+
+        if (!strcmp(argv[argi], "--emit-ir")) {
+            /* handled later via env / opts */
+            argi++;
             continue;
         }
 
