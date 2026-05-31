@@ -337,7 +337,7 @@ static LGGStInst *lg_gst_find_or_add(LG *g, Node *decl, const char *ns_name,
     inst->type_count = n < 8 ? n : 8;
     strncpy(inst->ns_name, ns_name, sizeof(inst->ns_name)-1);
     strncpy(inst->mangled, mangled, sizeof(inst->mangled)-1);
-    for (int i = 0; i < inst->type_count; i++) inst->ns_types[i] = ns_types[i];
+    for (int i = 0; i < inst->type_count; i++) inst->ns_types[i] = lg_dup(ns_types[i]);
     inst->next   = g->gst_insts;
     g->gst_insts = inst;
     return inst;
@@ -649,6 +649,10 @@ static Node *llg_infer_type(LG *g, Node *expr) {
         if (!ot) return NULL;
         if (ot->kind==NODE_TYPE_ARRAY) return ot->as.type_array.elem;
         if (ot->kind==NODE_TYPE_POINTER) return ot->as.type_ptr.inner;
+        /* str[i] / String[i] → u8 */
+        if (ot->kind==NODE_TYPE_NAMED &&
+            (!strcmp(ot->as.type_named.name,"str") || !strcmp(ot->as.type_named.name,"String")))
+            return lg_temp_named(g, "u8");
         return NULL;
     }
     case NODE_ASSIGN: return llg_infer_type(g, expr->as.assign.value);
@@ -769,7 +773,12 @@ static LLVMValueRef lg_match_cond(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             if (!strcmp(ed->as.enum_decl.variants[i], variant_name)) { idx = i; break; }
         if (idx < 0) return LLVMConstInt(LLVMInt1TypeInContext(ctx), 0, 0);
         LLVMValueRef v = lg_load(b, subj_ll_ty, subj_alloca, "");
-        LLVMValueRef tag = LLVMBuildExtractValue(b, v, 0, "tag");
+        LLVMValueRef tag;
+        /* simple enum = i32 directly; data enum = {i32, payload} → extractvalue */
+        if (LLVMGetTypeKind(subj_ll_ty) == LLVMIntegerTypeKind)
+            tag = v; /* simple enum: v IS the tag */
+        else
+            tag = LLVMBuildExtractValue(b, v, 0, "tag");
         LLVMValueRef cmp_val = LLVMConstInt(LLVMTypeOf(tag), (unsigned long long)idx, 0);
         return LLVMBuildICmp(b, LLVMIntEQ, tag, cmp_val, "variant_cmp");
     }
@@ -830,6 +839,15 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             if (lval_ty_out)  *lval_ty_out  = v->ll_ty;
             return lg_load(b, v->ll_ty, v->alloca, n->as.ident.name);
         }
+        /* None identifier → Option { flag=0, undef } using cur_ret_ty */
+        if (!strcmp(n->as.ident.name,"None") &&
+            g->cur_ret_ty && g->cur_ret_ty->kind==NODE_TYPE_NAMED &&
+            lg_type_form(g->cur_ret_ty->as.type_named.name,"Option")) {
+            LLVMTypeRef opt_ty = llg_ns_to_ll(g, g->cur_ret_ty->as.type_named.name);
+            LLVMValueRef vv = LLVMGetUndef(opt_ty);
+            vv = LLVMBuildInsertValue(b, vv, LLVMConstInt(LLVMInt1TypeInContext(ctx),0,0), 0, "none.flag");
+            return vv;
+        }
         /* global function reference */
         LGGlobal *gl = lg_find_global(g, n->as.ident.name);
         if (gl) return gl->fn_val;
@@ -848,9 +866,12 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
         LLVMTypeRef  src = LLVMTypeOf(val);
         LLVMTypeKind sk  = LLVMGetTypeKind(src);
         LLVMTypeKind dk  = LLVMGetTypeKind(dst);
-        if (sk == dk) return LLVMBuildBitCast(b, val, dst, "cast");
+        /* identity: same LLVM type object → no instruction */
+        if (src == dst) return val;
+        /* int → int: trunc / sext / zext */
         if (sk == LLVMIntegerTypeKind && dk == LLVMIntegerTypeKind) {
             unsigned sb = LLVMGetIntTypeWidth(src), db = LLVMGetIntTypeWidth(dst);
+            if (sb == db) return val; /* same width, no-op */
             Node *src_ns = llg_infer_type(g, n->as.cast.expr);
             const char *sname = (src_ns && src_ns->kind==NODE_TYPE_NAMED) ? src_ns->as.type_named.name : "i32";
             if (db > sb) {
@@ -860,6 +881,14 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             }
             return LLVMBuildTrunc(b, val, dst, "trunc");
         }
+        /* float → float: fpext / fptrunc */
+        if ((sk==LLVMFloatTypeKind||sk==LLVMDoubleTypeKind) &&
+            (dk==LLVMFloatTypeKind||dk==LLVMDoubleTypeKind)) {
+            if (sk == LLVMFloatTypeKind && dk == LLVMDoubleTypeKind)
+                return LLVMBuildFPExt(b, val, dst, "fpext");
+            return LLVMBuildFPTrunc(b, val, dst, "fptrunc");
+        }
+        /* int → float */
         if (sk == LLVMIntegerTypeKind && (dk==LLVMFloatTypeKind||dk==LLVMDoubleTypeKind)) {
             Node *src_ns = llg_infer_type(g, n->as.cast.expr);
             const char *sname = (src_ns && src_ns->kind==NODE_TYPE_NAMED) ? src_ns->as.type_named.name : "i32";
@@ -867,6 +896,7 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
                 LLVMBuildSIToFP(b, val, dst, "sitofp") :
                 LLVMBuildUIToFP(b, val, dst, "uitofp");
         }
+        /* float → int */
         if ((sk==LLVMFloatTypeKind||sk==LLVMDoubleTypeKind) && dk==LLVMIntegerTypeKind) {
             Node *dst_ns = n->as.cast.type;
             const char *dname = (dst_ns && dst_ns->kind==NODE_TYPE_NAMED) ? dst_ns->as.type_named.name : "i32";
@@ -1022,6 +1052,19 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
         LLVMValueRef lv = llg_emit_expr(g, b, cur_bb, NULL, NULL, lhs);
         LLVMValueRef rv = llg_emit_expr(g, b, cur_bb, NULL, NULL, rhs);
         LLVMTypeRef lty = LLVMTypeOf(lv);
+        LLVMTypeRef rty = LLVMTypeOf(rv);
+        /* coerce mismatched integer widths: widen narrower operand to match wider */
+        if (LLVMGetTypeKind(lty)==LLVMIntegerTypeKind &&
+            LLVMGetTypeKind(rty)==LLVMIntegerTypeKind && lty != rty) {
+            unsigned lb = LLVMGetIntTypeWidth(lty), rb = LLVMGetIntTypeWidth(rty);
+            Node *ns_l = llg_infer_type(g, lhs);
+            const char *ln = (ns_l&&ns_l->kind==NODE_TYPE_NAMED)?ns_l->as.type_named.name:"i32";
+            if (lb > rb) rv = lg_is_signed(ln) ? LLVMBuildSExt(b,rv,lty,"coerce.rhs")
+                                                : LLVMBuildZExt(b,rv,lty,"coerce.rhs");
+            else         lv = lg_is_signed(ln) ? LLVMBuildSExt(b,lv,rty,"coerce.lhs")
+                                                : LLVMBuildZExt(b,lv,rty,"coerce.lhs");
+            lty = LLVMTypeOf(lv);
+        }
         LLVMTypeKind tk = LLVMGetTypeKind(lty);
         int is_fp = (tk==LLVMFloatTypeKind || tk==LLVMDoubleTypeKind);
         Node *ns_ty = llg_infer_type(g, lhs);
@@ -1090,9 +1133,9 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
         LLVMValueRef obj_val = llg_emit_expr(g, b, cur_bb, &obj_ptr, &obj_elem_ty, obj);
         Node *obj_ns_ty = llg_infer_type(g, obj);
 
-        /* auto-deref pointer */
+        /* auto-deref pointer: works whether obj_ptr is set (variable) or not (computed value) */
         int was_ptr = 0;
-        if (!obj_ptr && obj_ns_ty && obj_ns_ty->kind==NODE_TYPE_POINTER) {
+        if (obj_ns_ty && obj_ns_ty->kind==NODE_TYPE_POINTER) {
             obj_ptr = obj_val;
             obj_elem_ty = llg_node_to_ll(g, obj_ns_ty->as.type_ptr.inner);
             obj_ns_ty = obj_ns_ty->as.type_ptr.inner;
@@ -1159,26 +1202,50 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
         if (obj_ns_ty && obj_ns_ty->kind==NODE_TYPE_NAMED) owner_name = obj_ns_ty->as.type_named.name;
         if (owner_name) {
             Node *sd = lg_find_decl(g, NODE_STRUCT_DECL, owner_name);
+            /* generic struct: "Pair[i32]" → find base "Pair" template */
+            char *gst_inner = NULL;
+            int saved_sub_count = 0;
+            if (!sd && strchr(owner_name, '[')) {
+                const char *lb = strchr(owner_name, '[');
+                char base_nm[128] = {0};
+                size_t bl = (size_t)(lb - owner_name);
+                if (bl < sizeof(base_nm)) { memcpy(base_nm, owner_name, bl); base_nm[bl] = 0; }
+                sd = lg_find_decl(g, NODE_STRUCT_DECL, base_nm);
+                if (sd && sd->as.struct_decl.type_params.count > 0) {
+                    gst_inner = lg_extract_inner(owner_name);
+                    if (gst_inner) {
+                        saved_sub_count = g->sub_count;
+                        g->sub_params[0] = sd->as.struct_decl.type_params.items[0]->as.ident.name;
+                        g->sub_types[0]  = gst_inner;
+                        g->sub_count = 1;
+                    }
+                }
+            }
             Node *ud = sd ? NULL : lg_find_decl(g, NODE_UNION_DECL, owner_name);
             NodeList *fields = sd ? &sd->as.struct_decl.fields :
                                ud ? &ud->as.union_decl.fields : NULL;
+            LLVMValueRef field_result = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
             if (fields) {
                 for (int i = 0; i < fields->count; i++) {
                     if (!strcmp(fields->items[i]->as.let.name, fld)) {
                         Node *fty_ns = fields->items[i]->as.let.type;
                         LLVMTypeRef fty_ll = fty_ns ? llg_node_to_ll(g, fty_ns) : LLVMInt32TypeInContext(ctx);
-                        LLVMTypeRef struct_ll = lg_find_named_type(g, owner_name);
+                        LLVMTypeRef struct_ll = llg_ns_to_ll(g, owner_name);
                         if (!struct_ll) struct_ll = obj_elem_ty;
                         if (obj_ptr && struct_ll) {
                             LLVMValueRef gep = LLVMBuildStructGEP2(b, struct_ll, obj_ptr, (unsigned)i, fld);
                             if (lval_ptr_out) *lval_ptr_out = gep;
                             if (lval_ty_out)  *lval_ty_out  = fty_ll;
-                            return lg_load(b, fty_ll, gep, fld);
+                            field_result = lg_load(b, fty_ll, gep, fld);
+                        } else {
+                            field_result = LLVMBuildExtractValue(b, obj_val, (unsigned)i, fld);
                         }
-                        return LLVMBuildExtractValue(b, obj_val, (unsigned)i, fld);
+                        break;
                     }
                 }
             }
+            if (gst_inner) { g->sub_count = saved_sub_count; free(gst_inner); }
+            return field_result;
         }
         return LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
     }
@@ -1205,12 +1272,19 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
                 if (lval_ty_out)  *lval_ty_out  = arr_elem;
                 return lg_load(b, arr_elem, gep, "arr.elem");
             }
-            /* slice or raw pointer */
+            /* slice, str, or raw pointer */
             LLVMValueRef data_ptr;
             if (obj_ns_ty && obj_ns_ty->kind==NODE_TYPE_ARRAY && obj_ns_ty->as.type_array.length<0) {
                 LLVMTypeRef slty = llg_node_to_ll(g, obj_ns_ty);
                 LLVMValueRef ptr_gep = LLVMBuildStructGEP2(b, slty, obj_ptr, 0, "sl.ptr");
                 data_ptr = lg_load(b, LLVMPointerTypeInContext(ctx,0), ptr_gep, "sl.data");
+            } else if (obj_ns_ty && obj_ns_ty->kind==NODE_TYPE_NAMED &&
+                       (!strcmp(obj_ns_ty->as.type_named.name,"str") ||
+                        !strcmp(obj_ns_ty->as.type_named.name,"String"))) {
+                const char *tnm = obj_ns_ty->as.type_named.name;
+                LLVMTypeRef str_ty = llg_ns_to_ll(g, tnm);
+                LLVMValueRef ptr_gep = LLVMBuildStructGEP2(b, str_ty, obj_ptr, 0, "str.ptr");
+                data_ptr = lg_load(b, LLVMPointerTypeInContext(ctx,0), ptr_gep, "str.data");
             } else {
                 data_ptr = lg_load(b, LLVMPointerTypeInContext(ctx,0), obj_ptr, "ptr.val");
             }
@@ -1344,6 +1418,43 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
                                 bval = LLVMBuildExtractValue(b, sv, !strcmp(pat,"Ok")?1:2, bname);
                             }
                             free(inner); free(ok); free(err);
+                        } else {
+                            /* user-defined data enum: EnumName.Variant(a, b, ...) */
+                            const char *dot = strchr(pat, '.');
+                            if (dot) {
+                                char enum_nm[128];
+                                size_t elen = (size_t)(dot - pat);
+                                if (elen >= sizeof(enum_nm)) elen = sizeof(enum_nm)-1;
+                                memcpy(enum_nm, pat, elen); enum_nm[elen] = '\0';
+                                const char *var_nm = dot + 1;
+                                Node *ed = lg_find_decl(g, NODE_ENUM_DECL, enum_nm);
+                                if (ed) {
+                                    int vi = -1;
+                                    for (int k = 0; k < ed->as.enum_decl.count; k++)
+                                        if (!strcmp(ed->as.enum_decl.variants[k], var_nm)) { vi = k; break; }
+                                    if (vi >= 0) {
+                                        NodeList *vf = &ed->as.enum_decl.variant_fields[vi];
+                                        /* compute byte offset of binding j */
+                                        unsigned off = 0;
+                                        for (int k = 0; k < j && k < vf->count; k++) {
+                                            LLVMTypeRef fty = llg_node_to_ll(g, vf->items[k]->as.let.type);
+                                            off += (unsigned)LLVMStoreSizeOfType(g->td, fty);
+                                        }
+                                        if (j < vf->count) {
+                                            bty = llg_node_to_ll(g, vf->items[j]->as.let.type);
+                                            LLVMTypeRef sty = llg_ns_to_ll(g, enum_nm);
+                                            LLVMTypeRef pl_arr = LLVMStructGetTypeAtIndex(sty, 1);
+                                            LLVMValueRef pl_ptr = LLVMBuildStructGEP2(b, sty, subj_alloca, 1, "pl.ptr");
+                                            LLVMValueRef gep_idx[2] = {
+                                                LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
+                                                LLVMConstInt(LLVMInt32TypeInContext(ctx), off, 0)
+                                            };
+                                            LLVMValueRef fld_ptr = LLVMBuildGEP2(b, pl_arr, pl_ptr, gep_idx, 2, "fld.ptr");
+                                            bval = lg_load(b, bty, fld_ptr, bname);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     LLVMValueRef ba = lg_alloca(g, b, bty, bname);
@@ -1402,11 +1513,62 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             Node *obj = callee_node->as.field.object;
             const char *mname = callee_node->as.field.field;
 
+            /* data enum constructor: EnumName.Variant(args...) */
+            if (obj->kind==NODE_IDENT && n->as.call.args.count > 0 &&
+                lg_enum_has_variant(g, obj->as.ident.name, mname)) {
+                const char *enum_nm = obj->as.ident.name;
+                Node *ed = lg_find_decl(g, NODE_ENUM_DECL, enum_nm);
+                if (ed) {
+                    int vi = -1;
+                    for (int k = 0; k < ed->as.enum_decl.count; k++)
+                        if (!strcmp(ed->as.enum_decl.variants[k], mname)) { vi = k; break; }
+                    if (vi >= 0 && ed->as.enum_decl.variant_fields[vi].count > 0) {
+                        LLVMTypeRef enum_ty = llg_ns_to_ll(g, enum_nm);
+                        LLVMValueRef ev = LLVMBuildAlloca(b, enum_ty, "ev.tmp");
+                        /* store tag */
+                        LLVMValueRef tag_ptr = LLVMBuildStructGEP2(b, enum_ty, ev, 0, "ev.tag.ptr");
+                        LLVMBuildStore(b, LLVMConstInt(LLVMInt32TypeInContext(ctx), (unsigned long long)vi, 0), tag_ptr);
+                        /* store payload fields */
+                        LLVMTypeRef pl_arr = LLVMStructGetTypeAtIndex(enum_ty, 1);
+                        LLVMValueRef pl_ptr = LLVMBuildStructGEP2(b, enum_ty, ev, 1, "ev.pl.ptr");
+                        NodeList *vf = &ed->as.enum_decl.variant_fields[vi];
+                        unsigned off = 0;
+                        for (int k = 0; k < n->as.call.args.count && k < vf->count; k++) {
+                            LLVMTypeRef fty = llg_node_to_ll(g, vf->items[k]->as.let.type);
+                            LLVMValueRef fval = llg_emit_expr(g, b, cur_bb, NULL, NULL,
+                                                              n->as.call.args.items[k]);
+                            fval = lg_coerce_arg(b, fval, fty, ctx);
+                            LLVMValueRef gep_idx[2] = {
+                                LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
+                                LLVMConstInt(LLVMInt32TypeInContext(ctx), off, 0)
+                            };
+                            LLVMValueRef fld_ptr = LLVMBuildGEP2(b, pl_arr, pl_ptr, gep_idx, 2, "ev.fld.ptr");
+                            LLVMBuildStore(b, fval, fld_ptr);
+                            off += (unsigned)LLVMStoreSizeOfType(g->td, fty);
+                        }
+                        return lg_load(b, enum_ty, ev, "ev.val");
+                    }
+                }
+            }
+
             /* String built-ins */
             if (obj->kind==NODE_IDENT && !strcmp(obj->as.ident.name,"String")) {
                 if (!strcmp(mname,"from")) {
                     LGGlobal *gl = lg_find_global(g, "NS_string_from");
-                    if (gl) { fn_val=gl->fn_val; fn_ty=gl->fn_ty; ret_ns=gl->ns_ret_ty; }
+                    if (gl) {
+                        /* NS_string_from uses out-pointer ABI: fn(ptr out, NStr s) -> void
+                           avoids C/LLVM ABI mismatch for 24-byte sret structs */
+                        LLVMTypeRef sng_ty = llg_ns_to_ll(g, "String");
+                        LLVMValueRef out_ptr = LLVMBuildAlloca(b, sng_ty, "sng.tmp");
+                        LLVMValueRef s_arg = llg_emit_expr(g, b, cur_bb, NULL, NULL,
+                                                           n->as.call.args.items[0]);
+                        LLVMTypeRef ptys[2];
+                        LLVMGetParamTypes(gl->fn_ty, ptys);
+                        s_arg = lg_coerce_arg(b, s_arg, ptys[1], ctx);
+                        LLVMValueRef call_args[2] = {out_ptr, s_arg};
+                        LLVMBuildCall2(b, gl->fn_ty, gl->fn_val, call_args, 2, "");
+                        return lg_load(b, sng_ty, out_ptr, "sng.val");
+                    }
                 }
             }
 
@@ -1441,28 +1603,39 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
                     } else if (!strcmp(mname,"push_str")) {
                         LGGlobal *gl = lg_find_global(g, "NS_string_push_str");
                         if (gl) { fn_val=gl->fn_val; fn_ty=gl->fn_ty; ret_ns=gl->ns_ret_ty; }
+                    } else if (!strcmp(mname,"flush")) {
+                        /* stdout.flush() → fflush(NULL) */
+                        LGGlobal *gl = lg_find_global(g, "fflush");
+                        if (gl) {
+                            LLVMValueRef null_arg = LLVMConstNull(LLVMPointerTypeInContext(ctx, 0));
+                            LLVMBuildCall2(b, gl->fn_ty, gl->fn_val, &null_arg, 1, "");
+                            return LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
+                        }
                     }
                 }
 
                 /* self argument injection for instance methods */
                 if (fn_val && fn_ty) {
-                    /* build args with self prepended */
                     int nparams = (int)LLVMCountParamTypes(fn_ty);
                     LLVMValueRef *args = calloc((size_t)(n->as.call.args.count + 2), sizeof(LLVMValueRef));
                     int ai = 0;
-                    /* push self (by pointer if method takes ptr, by value otherwise) */
-                    LLVMValueRef self_ptr = NULL; LLVMTypeRef self_elt = NULL;
-                    LLVMValueRef self_val = llg_emit_expr(g, b, cur_bb, &self_ptr, &self_elt, obj);
-                    if (nparams > 0) {
-                        LLVMTypeRef *param_tys = calloc((size_t)nparams, sizeof(LLVMTypeRef));
-                        LLVMGetParamTypes(fn_ty, param_tys);
-                        if (LLVMGetTypeKind(param_tys[0])==LLVMPointerTypeKind && self_ptr)
-                            args[ai++] = self_ptr;
-                        else
+                    /* only inject self when obj is a variable, not a type name */
+                    int obj_is_type = (obj->kind==NODE_IDENT && lg_is_known_type(g, obj->as.ident.name));
+                    if (!obj_is_type) {
+                        /* push self (by pointer if method takes ptr, by value otherwise) */
+                        LLVMValueRef self_ptr = NULL; LLVMTypeRef self_elt = NULL;
+                        LLVMValueRef self_val = llg_emit_expr(g, b, cur_bb, &self_ptr, &self_elt, obj);
+                        if (nparams > 0) {
+                            LLVMTypeRef *param_tys = calloc((size_t)nparams, sizeof(LLVMTypeRef));
+                            LLVMGetParamTypes(fn_ty, param_tys);
+                            if (LLVMGetTypeKind(param_tys[0])==LLVMPointerTypeKind && self_ptr)
+                                args[ai++] = self_ptr;
+                            else
+                                args[ai++] = self_val;
+                            free(param_tys);
+                        } else {
                             args[ai++] = self_val;
-                        free(param_tys);
-                    } else {
-                        args[ai++] = self_val;
+                        }
                     }
                     for (int j = 0; j < n->as.call.args.count; j++)
                         args[ai++] = llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.call.args.items[j]);
@@ -1493,6 +1666,81 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
         if (fn_sym && !fn_val) {
             LGGlobal *gl = lg_find_global(g, fn_sym);
             if (gl) { fn_val=gl->fn_val; fn_ty=gl->fn_ty; ret_ns=gl->ns_ret_ty; }
+        }
+
+        /* built-in function aliases (free functions without explicit extern decl) */
+        if (fn_sym && !fn_val) {
+            static const struct { const char *from; const char *to; } bi[] = {
+                {"println",   "NS_println"},
+                {"print",     "NS_print"},
+                {"print_int", "ns_io_print_i32"},
+                {"print_i32", "ns_io_print_i32"},
+                {"print_i64", "ns_io_print_i64"},
+                {"print_u32", "ns_io_print_u32"},
+                {"print_u64", "ns_io_print_u64"},
+                {"print_f64", "ns_io_print_f64"},
+                {"print_bool","ns_io_print_bool"},
+                {"read_int",  "ns_io_read_i32"},
+                {"readln",    "ns_io_readln"},
+                {NULL, NULL}
+            };
+            for (int bi_i = 0; bi[bi_i].from; bi_i++) {
+                if (!strcmp(fn_sym, bi[bi_i].from)) {
+                    LGGlobal *gl = lg_find_global(g, bi[bi_i].to);
+                    if (gl) { fn_val=gl->fn_val; fn_ty=gl->fn_ty; ret_ns=gl->ns_ret_ty; }
+                    break;
+                }
+            }
+        }
+
+        /* Option/Result constructors: Some(v), None, Ok(v), Err(e) */
+        if (fn_sym && (!fn_val || !fn_ty)) {
+            LLVMTypeRef i1_ty = LLVMInt1TypeInContext(ctx);
+            if (!strcmp(fn_sym,"Some") && n->as.call.args.count == 1) {
+                LLVMValueRef inner_val = llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.call.args.items[0]);
+                LLVMTypeRef inner_ty = LLVMTypeOf(inner_val);
+                /* build Option struct from cur_ret_ty if available, else anonymous */
+                LLVMTypeRef opt_ty;
+                if (g->cur_ret_ty && g->cur_ret_ty->kind==NODE_TYPE_NAMED &&
+                    lg_type_form(g->cur_ret_ty->as.type_named.name,"Option"))
+                    opt_ty = llg_ns_to_ll(g, g->cur_ret_ty->as.type_named.name);
+                else {
+                    LLVMTypeRef fs[2] = {i1_ty, inner_ty};
+                    opt_ty = LLVMStructTypeInContext(ctx, fs, 2, 0);
+                }
+                LLVMValueRef v = LLVMGetUndef(opt_ty);
+                v = LLVMBuildInsertValue(b, v, LLVMConstInt(i1_ty,1,0), 0, "some.flag");
+                v = LLVMBuildInsertValue(b, v, inner_val, 1, "some.val");
+                return v;
+            }
+            if (!strcmp(fn_sym,"None") && n->as.call.args.count == 0 &&
+                g->cur_ret_ty && g->cur_ret_ty->kind==NODE_TYPE_NAMED &&
+                lg_type_form(g->cur_ret_ty->as.type_named.name,"Option")) {
+                LLVMTypeRef opt_ty = llg_ns_to_ll(g, g->cur_ret_ty->as.type_named.name);
+                LLVMValueRef v = LLVMGetUndef(opt_ty);
+                v = LLVMBuildInsertValue(b, v, LLVMConstInt(i1_ty,0,0), 0, "none.flag");
+                return v;
+            }
+            if (!strcmp(fn_sym,"Ok") && n->as.call.args.count == 1 &&
+                g->cur_ret_ty && g->cur_ret_ty->kind==NODE_TYPE_NAMED &&
+                lg_type_form(g->cur_ret_ty->as.type_named.name,"Result")) {
+                LLVMValueRef ok_val = llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.call.args.items[0]);
+                LLVMTypeRef res_ty = llg_ns_to_ll(g, g->cur_ret_ty->as.type_named.name);
+                LLVMValueRef v = LLVMGetUndef(res_ty);
+                v = LLVMBuildInsertValue(b, v, LLVMConstInt(i1_ty,1,0), 0, "ok.flag");
+                v = LLVMBuildInsertValue(b, v, ok_val, 1, "ok.val");
+                return v;
+            }
+            if (!strcmp(fn_sym,"Err") && n->as.call.args.count == 1 &&
+                g->cur_ret_ty && g->cur_ret_ty->kind==NODE_TYPE_NAMED &&
+                lg_type_form(g->cur_ret_ty->as.type_named.name,"Result")) {
+                LLVMValueRef err_val = llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.call.args.items[0]);
+                LLVMTypeRef res_ty = llg_ns_to_ll(g, g->cur_ret_ty->as.type_named.name);
+                LLVMValueRef v = LLVMGetUndef(res_ty);
+                v = LLVMBuildInsertValue(b, v, LLVMConstInt(i1_ty,0,0), 0, "err.flag");
+                v = LLVMBuildInsertValue(b, v, err_val, 2, "err.val");
+                return v;
+            }
         }
 
         if (!fn_val || !fn_ty)
@@ -1535,17 +1783,45 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             ? llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.slice_expr.start)
             : LLVMConstInt(LLVMInt64TypeInContext(ctx), 0, 0);
 
+        LLVMTypeRef i64_ty_sl = LLVMInt64TypeInContext(ctx);
+        LLVMTypeRef ptr_ty_sl = LLVMPointerTypeInContext(ctx, 0);
+
         LLVMValueRef data_ptr;
+        LLVMValueRef orig_len_v = NULL; /* filled in for open-ended slices */
         Node *elem_ns = NULL;
+
+        int is_str_like = (obj_ns && obj_ns->kind==NODE_TYPE_NAMED &&
+                           (!strcmp(obj_ns->as.type_named.name,"str") ||
+                            !strcmp(obj_ns->as.type_named.name,"String")));
+
         if (obj_ns && obj_ns->kind==NODE_TYPE_ARRAY && obj_ns->as.type_array.length<0) {
+            /* slice type: { ptr, i64 } */
             LLVMTypeRef slty = llg_node_to_ll(g, obj_ns);
+            LLVMValueRef ptr_fld, len_fld;
             if (obj_ptr) {
-                LLVMValueRef pp = LLVMBuildStructGEP2(b, slty, obj_ptr, 0, "sl.ptr.f");
-                data_ptr = lg_load(b, LLVMPointerTypeInContext(ctx,0), pp, "sl.data");
+                ptr_fld = LLVMBuildStructGEP2(b, slty, obj_ptr, 0, "sl.ptr.f");
+                len_fld = LLVMBuildStructGEP2(b, slty, obj_ptr, 1, "sl.len.f");
+                data_ptr = lg_load(b, ptr_ty_sl, ptr_fld, "sl.data");
+                orig_len_v = lg_load(b, i64_ty_sl, len_fld, "sl.len");
             } else {
                 data_ptr = LLVMBuildExtractValue(b, obj_val, 0, "sl.data");
+                orig_len_v = LLVMBuildExtractValue(b, obj_val, 1, "sl.len");
             }
             elem_ns = obj_ns->as.type_array.elem;
+        } else if (is_str_like) {
+            /* str: { ptr, i64 } / String: { ptr, i64, i64 } — field 0=ptr, 1=len */
+            const char *tnm = obj_ns->as.type_named.name;
+            LLVMTypeRef sty = llg_ns_to_ll(g, tnm);
+            LLVMValueRef ptr_fld, len_fld;
+            if (obj_ptr) {
+                ptr_fld = LLVMBuildStructGEP2(b, sty, obj_ptr, 0, "s.ptr.f");
+                len_fld = LLVMBuildStructGEP2(b, sty, obj_ptr, 1, "s.len.f");
+                data_ptr = lg_load(b, ptr_ty_sl, ptr_fld, "s.data");
+                orig_len_v = lg_load(b, i64_ty_sl, len_fld, "s.len");
+            } else {
+                data_ptr = LLVMBuildExtractValue(b, obj_val, 0, "s.data");
+                orig_len_v = LLVMBuildExtractValue(b, obj_val, 1, "s.len");
+            }
         } else if (obj_ptr) {
             data_ptr = obj_ptr;
             if (obj_ns && obj_ns->kind==NODE_TYPE_POINTER) elem_ns = obj_ns->as.type_ptr.inner;
@@ -1553,29 +1829,24 @@ static LLVMValueRef llg_emit_expr(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cu
             data_ptr = obj_val;
         }
         LLVMTypeRef elem_ll = elem_ns ? llg_node_to_ll(g, elem_ns) : LLVMInt8TypeInContext(ctx);
+        /* coerce start to i64 for consistent arithmetic */
+        if (LLVMTypeOf(start_v) != i64_ty_sl)
+            start_v = LLVMBuildZExt(b, start_v, i64_ty_sl, "start.i64");
         LLVMValueRef idx[1] = { start_v };
         LLVMValueRef new_ptr = LLVMBuildGEP2(b, elem_ll, data_ptr, idx, 1, "slice.ptr");
 
-        /* compute len */
+        /* compute len as i64 */
         LLVMValueRef len_v;
         if (n->as.slice_expr.end) {
             LLVMValueRef end_v = llg_emit_expr(g, b, cur_bb, NULL, NULL, n->as.slice_expr.end);
+            if (LLVMTypeOf(end_v) != i64_ty_sl)
+                end_v = LLVMBuildZExt(b, end_v, i64_ty_sl, "end.i64");
             len_v = LLVMBuildSub(b, end_v, start_v, "slice.len");
         } else {
-            /* slice to end: need original len - start */
-            LLVMValueRef orig_len;
-            if (obj_ns && obj_ns->kind==NODE_TYPE_ARRAY && obj_ns->as.type_array.length<0) {
-                LLVMTypeRef slty = llg_node_to_ll(g, obj_ns);
-                if (obj_ptr) {
-                    LLVMValueRef lp = LLVMBuildStructGEP2(b, slty, obj_ptr, 1, "sl.len.f");
-                    orig_len = lg_load(b, LLVMInt64TypeInContext(ctx), lp, "sl.len");
-                } else {
-                    orig_len = LLVMBuildExtractValue(b, obj_val, 1, "sl.len");
-                }
-            } else {
-                orig_len = LLVMConstInt(LLVMInt64TypeInContext(ctx), 0, 0);
-            }
-            len_v = LLVMBuildSub(b, orig_len, start_v, "slice.len");
+            /* open-ended slice: len = orig_len - start */
+            if (!orig_len_v)
+                orig_len_v = LLVMConstInt(i64_ty_sl, 0, 0);
+            len_v = LLVMBuildSub(b, orig_len_v, start_v, "slice.len");
         }
         /* build slice struct {ptr, len} */
         LLVMTypeRef fields2[2] = { LLVMPointerTypeInContext(ctx,0), LLVMInt64TypeInContext(ctx) };
@@ -1601,7 +1872,18 @@ static void llg_emit_block(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cur_bb, N
         if (LLVMGetBasicBlockTerminator(cur)) break;
         llg_emit_stmt(g, b, cur_bb, blk->as.block.stmts.items[i]);
     }
-    lg_emit_scope_defers(g, b, cur_bb);
+    {
+        LLVMBasicBlockRef cur = cur_bb ? *cur_bb : LLVMGetInsertBlock(b);
+        if (!LLVMGetBasicBlockTerminator(cur)) {
+            lg_emit_scope_defers(g, b, cur_bb);
+        } else {
+            /* block terminated by return/break/continue — defers already emitted;
+               just reset count to scope baseline to avoid re-emission */
+            int mark = (g->scope_defer_depth > 0) ?
+                       g->scope_defer_marks[g->scope_defer_depth-1] : 0;
+            g->defer_count = mark;
+        }
+    }
     lg_pop_scope(g);
 }
 
@@ -1724,7 +2006,7 @@ static void llg_emit_stmt(LG *g, LLVMBuilderRef b, LLVMBasicBlockRef *cur_bb, No
         llg_emit_block(g, b, cur_bb, n->as.loop_stmt.body);
         if (g->loop_depth > 0) g->loop_depth--;
         LLVMBasicBlockRef body_end = cur_bb ? *cur_bb : LLVMGetInsertBlock(b);
-        if (!LLVMGetBasicBlockTerminator(body_end)) LLVMBuildBr(b, body_bb);
+        if (!LLVMGetBasicBlockTerminator(body_end)) LLVMBuildBr(b, done_bb);
         LLVMPositionBuilderAtEnd(b, done_bb);
         if (cur_bb) *cur_bb = done_bb;
         break;
@@ -1999,6 +2281,18 @@ static void llg_declare_fn(LG *g, Node *d) {
         fn_ty = llg_build_fn_type(g, params, ret_type, 0, NULL);
     }
 
+    /* main() must always have i32 return type for the OS ABI */
+    if (!owner && !strcmp(sym, "main")) {
+        LLVMTypeRef i32_ty = LLVMInt32TypeInContext(g->ctx);
+        if (LLVMGetTypeKind(LLVMGetReturnType(fn_ty)) == LLVMVoidTypeKind) {
+            unsigned np = LLVMCountParamTypes(fn_ty);
+            LLVMTypeRef *ptys = calloc((size_t)(np > 0 ? np : 1), sizeof(LLVMTypeRef));
+            LLVMGetParamTypes(fn_ty, ptys);
+            fn_ty = LLVMFunctionType(i32_ty, ptys, np, 0);
+            free(ptys);
+        }
+    }
+
     LLVMValueRef fn_val = LLVMAddFunction(g->mod, sym, fn_ty);
     if (d->kind==NODE_EXTERN_FN)
         LLVMSetLinkage(fn_val, LLVMExternalLinkage);
@@ -2091,7 +2385,7 @@ static void llg_declare_runtime(LG *g) {
     LLVMTypeRef f64_ty  = LLVMDoubleTypeInContext(ctx);
     LLVMTypeRef void_ty = LLVMVoidTypeInContext(ctx);
     LLVMTypeRef str_ty  = llg_ns_to_ll(g, "str");
-    LLVMTypeRef sng_ty  = llg_ns_to_ll(g, "String");
+    (void)llg_ns_to_ll(g, "String"); /* ensure NString type registered */
 
     struct { const char *nm; LLVMTypeRef *ptys; unsigned np; LLVMTypeRef ret; } rt[] = {
         /* IO */
@@ -2102,7 +2396,7 @@ static void llg_declare_runtime(LG *g) {
         {"NS_println_bool", (LLVMTypeRef[]){i32_ty}, 1, void_ty},
         {"NS_println_char", (LLVMTypeRef[]){i32_ty}, 1, void_ty},
         /* String */
-        {"NS_string_from",     (LLVMTypeRef[]){str_ty},          1, sng_ty},
+        {"NS_string_from",     (LLVMTypeRef[]){ptr_ty, str_ty},   2, void_ty},
         {"NS_string_as_str",   (LLVMTypeRef[]){ptr_ty},          1, str_ty},
         {"NS_string_free",     (LLVMTypeRef[]){ptr_ty},          1, void_ty},
         {"NS_string_push_str", (LLVMTypeRef[]){ptr_ty, str_ty},  2, void_ty},
@@ -2115,8 +2409,19 @@ static void llg_declare_runtime(LG *g) {
         /* C stdio wrappers */
         {"printf",  (LLVMTypeRef[]){ptr_ty}, 1, i32_ty},
         {"puts",    (LLVMTypeRef[]){ptr_ty}, 1, i32_ty},
+        {"fputs",   (LLVMTypeRef[]){ptr_ty, ptr_ty}, 2, i32_ty},
+        {"fflush",  (LLVMTypeRef[]){ptr_ty}, 1, i32_ty},
         {"malloc",  (LLVMTypeRef[]){i64_ty}, 1, ptr_ty},
         {"free",    (LLVMTypeRef[]){ptr_ty}, 1, void_ty},
+        /* typed I/O helpers (builtins: print_int, read_int, etc.) */
+        {"ns_io_print_i32",  (LLVMTypeRef[]){i32_ty}, 1, void_ty},
+        {"ns_io_print_i64",  (LLVMTypeRef[]){i64_ty}, 1, void_ty},
+        {"ns_io_print_u32",  (LLVMTypeRef[]){i32_ty}, 1, void_ty},
+        {"ns_io_print_u64",  (LLVMTypeRef[]){i64_ty}, 1, void_ty},
+        {"ns_io_print_f64",  (LLVMTypeRef[]){f64_ty}, 1, void_ty},
+        {"ns_io_print_bool", (LLVMTypeRef[]){i32_ty}, 1, void_ty},
+        {"ns_io_read_i32",   NULL, 0, i32_ty},
+        {"ns_io_readln",     NULL, 0, ptr_ty},
         {NULL, NULL, 0, NULL}
     };
 
@@ -2228,13 +2533,474 @@ static void llg_instantiate_generics(LG *g) {
             LLVMTypeRef *fields = calloc((size_t)(n>0?n:1), sizeof(LLVMTypeRef));
             for (int i = 0; i < n; i++)
                 fields[i] = llg_node_to_ll(g, inst->decl->as.struct_decl.fields.items[i]->as.let.type);
-            LLVMTypeRef ty = LLVMStructCreateNamed(g->ctx, inst->ns_name);
+            LLVMTypeRef ty = LLVMStructCreateNamed(g->ctx, inst->mangled);
             LLVMStructSetBody(ty, fields, (unsigned)n, 0);
             free(fields);
+            lg_register_type(g, inst->mangled, ty, inst->decl);
             lg_register_type(g, inst->ns_name, ty, inst->decl);
             g->sub_count = 0;
         }
     }
+}
+
+/* ── interface vtable + coercion function generation ────────────────────── */
+
+static void llg_setup_interfaces(LG *g) {
+    LLVMContextRef ctx = g->ctx;
+    LLVMTypeRef ptr_ty = LLVMPointerTypeInContext(ctx, 0);
+
+    /* Pass A: register interface and vtable types */
+    for (int i = 0; i < g->program->as.program.decls.count; i++) {
+        Node *d = g->program->as.program.decls.items[i];
+        if (d->kind != NODE_INTERFACE_DECL) continue;
+        const char *iname = d->as.interface_decl.name;
+
+        char vt_name[256]; snprintf(vt_name, sizeof(vt_name), "%s_vtable", iname);
+        if (!lg_find_named_type(g, vt_name)) {
+            int nm = d->as.interface_decl.methods.count;
+            LLVMTypeRef *vf = calloc((size_t)(nm > 0 ? nm : 1), sizeof(LLVMTypeRef));
+            for (int j = 0; j < nm; j++) vf[j] = ptr_ty;
+            LLVMTypeRef vt_ty = LLVMStructCreateNamed(ctx, vt_name);
+            LLVMStructSetBody(vt_ty, vf, (unsigned)nm, 0);
+            free(vf);
+            lg_register_type(g, lg_dup(vt_name), vt_ty, d);
+        }
+
+        if (!lg_find_named_type(g, iname)) {
+            LLVMTypeRef ifields[2] = {ptr_ty, ptr_ty};
+            LLVMTypeRef iface_ty = LLVMStructCreateNamed(ctx, iname);
+            LLVMStructSetBody(iface_ty, ifields, 2, 0);
+            lg_register_type(g, lg_dup(iname), iface_ty, d);
+        }
+    }
+
+    /* Pass B: for each impl : Interface, emit vtable global + coercion fn */
+    for (int i = 0; i < g->program->as.program.decls.count; i++) {
+        Node *impl = g->program->as.program.decls.items[i];
+        if (impl->kind != NODE_IMPL_DECL || !impl->as.impl.interface_name) continue;
+        const char *tname = impl->as.impl.target;
+        const char *iname = impl->as.impl.interface_name;
+
+        Node *iface = lg_find_decl(g, NODE_INTERFACE_DECL, iname);
+        if (!iface) continue;
+
+        char vt_name[256]; snprintf(vt_name, sizeof(vt_name), "%s_vtable", iname);
+        LLVMTypeRef vt_ty = lg_find_named_type(g, vt_name);
+        LLVMTypeRef iface_ty = lg_find_named_type(g, iname);
+        if (!vt_ty || !iface_ty) continue;
+
+        /* build vtable constant */
+        int nm = iface->as.interface_decl.methods.count;
+        LLVMValueRef *vv = calloc((size_t)(nm > 0 ? nm : 1), sizeof(LLVMValueRef));
+        for (int j = 0; j < nm; j++) {
+            const char *mname = iface->as.interface_decl.methods.items[j]->as.fn.name;
+            char sym[512]; snprintf(sym, sizeof(sym), "%s_%s", tname, mname);
+            LGGlobal *gl = lg_find_global(g, sym);
+            vv[j] = gl ? gl->fn_val : LLVMConstNull(ptr_ty);
+        }
+
+        char gvt_name[512]; snprintf(gvt_name, sizeof(gvt_name), "%s_%s_vtable", tname, iname);
+        LLVMValueRef vt_const = LLVMConstNamedStruct(vt_ty, vv, (unsigned)nm);
+        LLVMValueRef gvt = LLVMAddGlobal(g->mod, vt_ty, gvt_name);
+        LLVMSetInitializer(gvt, vt_const);
+        LLVMSetGlobalConstant(gvt, 1);
+        LLVMSetLinkage(gvt, LLVMInternalLinkage);
+        free(vv);
+
+        /* emit TypeName_as_InterfaceName coercion function */
+        char coerce_name[512]; snprintf(coerce_name, sizeof(coerce_name), "%s_as_%s", tname, iname);
+        if (lg_find_global(g, coerce_name)) continue;
+        LLVMTypeRef coerce_fn_ty = LLVMFunctionType(iface_ty, &ptr_ty, 1, 0);
+        LLVMValueRef coerce_fn = LLVMAddFunction(g->mod, coerce_name, coerce_fn_ty);
+        lg_add_global(g, lg_dup(coerce_name), coerce_fn, coerce_fn_ty, NULL, NULL);
+
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, coerce_fn, "entry");
+        LLVMBuilderRef b = LLVMCreateBuilderInContext(ctx);
+        LLVMPositionBuilderAtEnd(b, entry);
+        LLVMValueRef data_arg = LLVMGetParam(coerce_fn, 0);
+        LLVMValueRef fat = LLVMGetUndef(iface_ty);
+        fat = LLVMBuildInsertValue(b, fat, data_arg, 0, "fat.data");
+        fat = LLVMBuildInsertValue(b, fat, gvt, 1, "fat.vtable");
+        LLVMBuildRet(b, fat);
+        LLVMDisposeBuilder(b);
+    }
+}
+
+/* ── UI element collection (v0.8.2) ─────────────────────────────────────── */
+
+#define LG_UI_MAX_ELEMS 128
+
+typedef struct {
+    int   kind;
+    char  text[256];
+    int   has_onclick, has_onkey, has_onchange;
+    Node *onclick_body, *onkey_body, *onchange_body;
+} LGUIElem;
+
+static void llg_ui_collect(Node *n, LGUIElem *elems, int *count) {
+    if (!n || n->kind != NODE_UI_ELEMENT) return;
+    int k = n->as.ui_element.elem_kind;
+    if (k == UI_ELEM_WINDOW || k == UI_ELEM_ROW ||
+        k == UI_ELEM_COLUMN || k == UI_ELEM_PANEL) {
+        for (int i = 0; i < n->as.ui_element.children.count; i++)
+            llg_ui_collect(n->as.ui_element.children.items[i], elems, count);
+        return;
+    }
+    if (*count >= LG_UI_MAX_ELEMS) return;
+    LGUIElem *e = &elems[(*count)++];
+    memset(e, 0, sizeof(*e));
+    e->kind = k;
+    if (n->as.ui_element.text)
+        snprintf(e->text, sizeof(e->text), "%s", n->as.ui_element.text);
+    for (int i = 0; i < n->as.ui_element.handlers.count; i++) {
+        Node *h = n->as.ui_element.handlers.items[i];
+        if (h->kind != NODE_UI_HANDLER) continue;
+        if (h->as.ui_handler.handler_kind == UI_HANDLER_CLICK) {
+            e->has_onclick = 1; e->onclick_body = h->as.ui_handler.body;
+        } else if (h->as.ui_handler.handler_kind == UI_HANDLER_KEY) {
+            e->has_onkey = 1; e->onkey_body = h->as.ui_handler.body;
+        } else if (h->as.ui_handler.handler_kind == UI_HANDLER_CHANGE) {
+            e->has_onchange = 1; e->onchange_body = h->as.ui_handler.body;
+        }
+    }
+    for (int i = 0; i < n->as.ui_element.children.count; i++)
+        llg_ui_collect(n->as.ui_element.children.items[i], elems, count);
+}
+
+static void llg_ui_emit_handler(LG *g, int idx, const char *hkind, Node *body) {
+    char name[128];
+    snprintf(name, sizeof(name), "ns_handler_%d_%s", idx, hkind);
+    LLVMTypeRef fn_ty = LLVMFunctionType(LLVMVoidTypeInContext(g->ctx), NULL, 0, 0);
+    LLVMValueRef fn = LLVMAddFunction(g->mod, name, fn_ty);
+    LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(g->ctx, fn, "entry");
+    LLVMBuilderRef b = LLVMCreateBuilderInContext(g->ctx);
+    LLVMPositionBuilderAtEnd(b, entry);
+    LLVMValueRef prev_fn = g->cur_fn;
+    Node *prev_ret = g->cur_ret_ty;
+    g->cur_fn = fn;
+    g->cur_ret_ty = NULL;
+    lg_push_scope(g);
+    LLVMBasicBlockRef cur_bb = entry;
+    if (body) llg_emit_block(g, b, &cur_bb, body);
+    lg_pop_scope(g);
+    if (!LLVMGetBasicBlockTerminator(cur_bb)) LLVMBuildRetVoid(b);
+    g->cur_fn = prev_fn;
+    g->cur_ret_ty = prev_ret;
+    LLVMDisposeBuilder(b);
+}
+
+static void llg_emit_ui_handlers(LG *g, Node *prog) {
+    LGUIElem elems[LG_UI_MAX_ELEMS];
+    int count = 0;
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        Node *d = prog->as.program.decls.items[i];
+        if (d->kind == NODE_UI_APP) {
+            for (int j = 0; j < d->as.ui_app.children.count; j++)
+                llg_ui_collect(d->as.ui_app.children.items[j], elems, &count);
+        }
+    }
+    for (int i = 0; i < count; i++) {
+        LGUIElem *e = &elems[i];
+        if (e->has_onclick)  llg_ui_emit_handler(g, i, "onclick",  e->onclick_body);
+        if (e->has_onkey)    llg_ui_emit_handler(g, i, "onkey",    e->onkey_body);
+        if (e->has_onchange) llg_ui_emit_handler(g, i, "onchange", e->onchange_body);
+    }
+}
+
+static int llg_prog_has_ui(Node *prog) {
+    for (int i = 0; i < prog->as.program.decls.count; i++)
+        if (prog->as.program.decls.items[i]->kind == NODE_UI_APP) return 1;
+    return 0;
+}
+
+/* ── UI 8x8 font (public-domain PC BIOS, ASCII 0x20-0x7F) ───────────────── */
+
+static const unsigned char k_ui_font[96][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
+    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, /* ! */
+    {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, /* " */
+    {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, /* # */
+    {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, /* $ */
+    {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, /* % */
+    {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, /* & */
+    {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00}, /* ' */
+    {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, /* ( */
+    {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, /* ) */
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, /* * */
+    {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, /* + */
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06}, /* , */
+    {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, /* - */
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, /* . */
+    {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00}, /* / */
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, /* 0 */
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, /* 1 */
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, /* 2 */
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, /* 3 */
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, /* 4 */
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, /* 5 */
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, /* 6 */
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, /* 7 */
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, /* 8 */
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, /* 9 */
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, /* : */
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06}, /* ; */
+    {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, /* < */
+    {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, /* = */
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, /* > */
+    {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00}, /* ? */
+    {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00}, /* @ */
+    {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00}, /* A */
+    {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00}, /* B */
+    {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00}, /* C */
+    {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00}, /* D */
+    {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00}, /* E */
+    {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00}, /* F */
+    {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00}, /* G */
+    {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00}, /* H */
+    {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, /* I */
+    {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00}, /* J */
+    {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00}, /* K */
+    {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00}, /* L */
+    {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00}, /* M */
+    {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00}, /* N */
+    {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00}, /* O */
+    {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00}, /* P */
+    {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00}, /* Q */
+    {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00}, /* R */
+    {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00}, /* S */
+    {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, /* T */
+    {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00}, /* U */
+    {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00}, /* V */
+    {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, /* W */
+    {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00}, /* X */
+    {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00}, /* Y */
+    {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00}, /* Z */
+    {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00}, /* [ */
+    {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00}, /* \ */
+    {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00}, /* ] */
+    {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00}, /* ^ */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, /* _ */
+    {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00}, /* ` */
+    {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00}, /* a */
+    {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00}, /* b */
+    {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00}, /* c */
+    {0x38,0x30,0x30,0x3E,0x33,0x33,0x6E,0x00}, /* d */
+    {0x00,0x00,0x1E,0x33,0x3F,0x03,0x1E,0x00}, /* e */
+    {0x1C,0x36,0x06,0x0F,0x06,0x06,0x0F,0x00}, /* f */
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F}, /* g */
+    {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00}, /* h */
+    {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00}, /* i */
+    {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E}, /* j */
+    {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00}, /* k */
+    {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, /* l */
+    {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00}, /* m */
+    {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00}, /* n */
+    {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00}, /* o */
+    {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F}, /* p */
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78}, /* q */
+    {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00}, /* r */
+    {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00}, /* s */
+    {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00}, /* t */
+    {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00}, /* u */
+    {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00}, /* v */
+    {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00}, /* w */
+    {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00}, /* x */
+    {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F}, /* y */
+    {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00}, /* z */
+    {0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00}, /* { */
+    {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, /* | */
+    {0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00}, /* } */
+    {0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00}, /* ~ */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* DEL */
+};
+
+/* Static SDL2 render helpers (font-dependent, widget-drawing) */
+static const char *k_ui_sdl2_c =
+"static void ns_draw_char(SDL_Renderer*r,int x,int y,char c,Uint8 R,Uint8 G,Uint8 B){\n"
+"    if(c<32||c>127)return;\n"
+"    const unsigned char*g=ns_font8x8[(unsigned char)c-32];\n"
+"    SDL_SetRenderDrawColor(r,R,G,B,255);\n"
+"    for(int row=0;row<8;row++){\n"
+"        unsigned char bits=g[row];\n"
+"        for(int col=0;col<8;col++)\n"
+"            if(bits&(0x80>>col)) SDL_RenderDrawPoint(r,x+col,y+row);\n"
+"    }\n"
+"}\n"
+"static void ns_draw_text(SDL_Renderer*r,int x,int y,const char*s,Uint8 R,Uint8 G,Uint8 B){\n"
+"    for(;s&&*s;s++,x+=8) ns_draw_char(r,x,y,*s,R,G,B);\n"
+"}\n"
+"static void ns_render_button(SDL_Renderer*r,int x,int y,int w,int h,const char*t){\n"
+"    SDL_SetRenderDrawColor(r,80,80,180,255);\n"
+"    SDL_Rect rc={x,y,w,h}; SDL_RenderFillRect(r,&rc);\n"
+"    SDL_SetRenderDrawColor(r,180,180,255,255); SDL_RenderDrawRect(r,&rc);\n"
+"    if(t) ns_draw_text(r,x+4,y+(h-8)/2,t,255,255,255);\n"
+"}\n"
+"static void ns_render_label(SDL_Renderer*r,int x,int y,int w,int h,const char*t){\n"
+"    (void)w;(void)h; if(t) ns_draw_text(r,x,y,t,220,220,220);\n"
+"}\n"
+"static void ns_render_input(SDL_Renderer*r,int x,int y,int w,int h,const char*t){\n"
+"    SDL_SetRenderDrawColor(r,40,40,40,255);\n"
+"    SDL_Rect rc={x,y,w,h}; SDL_RenderFillRect(r,&rc);\n"
+"    SDL_SetRenderDrawColor(r,160,160,160,255); SDL_RenderDrawRect(r,&rc);\n"
+"    if(t) ns_draw_text(r,x+4,y+(h-8)/2,t,200,200,200);\n"
+"}\n"
+"static void ns_render_all(SDL_Renderer*r,NSUIElem*elems,int n){\n"
+"    for(int i=0;i<n;i++){\n"
+"        NSUIElem*e=&elems[i];\n"
+"        if(e->kind==1) ns_render_button(r,e->x,e->y,e->w,e->h,e->text);\n"
+"        else if(e->kind==2) ns_render_label(r,e->x,e->y,e->w,e->h,e->text);\n"
+"        else if(e->kind==3) ns_render_input(r,e->x,e->y,e->w,e->h,e->text);\n"
+"    }\n"
+"}\n";
+
+static void llg_write_ui_runtime(FILE *f, LGUIElem *elems, int count,
+                                  const char *title, int win_w, int win_h) {
+    /* includes */
+    fprintf(f, "#include <SDL2/SDL.h>\n#include <string.h>\n\n");
+    /* handler externs */
+    for (int i = 0; i < count; i++) {
+        if (elems[i].has_onclick)
+            fprintf(f, "extern void ns_handler_%d_onclick(void);\n", i);
+        if (elems[i].has_onkey)
+            fprintf(f, "extern void ns_handler_%d_onkey(void);\n", i);
+        if (elems[i].has_onchange)
+            fprintf(f, "extern void ns_handler_%d_onchange(void);\n", i);
+    }
+    fprintf(f, "\n");
+    /* NSUIElem typedef */
+    fprintf(f, "typedef struct {\n");
+    fprintf(f, "    int kind; char *text; int x,y,w,h;\n");
+    fprintf(f, "    void(*onclick)(void); void(*onkey)(void); void(*onchange)(void);\n");
+    fprintf(f, "} NSUIElem;\n\n");
+    /* font */
+    fprintf(f, "static const unsigned char ns_font8x8[96][8] = {\n");
+    for (int i = 0; i < 96; i++) {
+        fprintf(f, "  {0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X},\n",
+                k_ui_font[i][0], k_ui_font[i][1], k_ui_font[i][2], k_ui_font[i][3],
+                k_ui_font[i][4], k_ui_font[i][5], k_ui_font[i][6], k_ui_font[i][7]);
+    }
+    fprintf(f, "};\n\n");
+    /* draw helpers */
+    fputs(k_ui_sdl2_c, f);
+    /* element table */
+    fprintf(f, "static NSUIElem ns_ui_elems[] = {\n");
+    int ey = 60;
+    for (int i = 0; i < count; i++) {
+        LGUIElem *e = &elems[i];
+        char oc[64], ok[64], och[64];
+        snprintf(oc,  sizeof(oc),  e->has_onclick  ? "ns_handler_%d_onclick"  : "0", i);
+        snprintf(ok,  sizeof(ok),  e->has_onkey    ? "ns_handler_%d_onkey"    : "0", i);
+        snprintf(och, sizeof(och), e->has_onchange  ? "ns_handler_%d_onchange" : "0", i);
+        fprintf(f, "  {%d,\"%s\",20,%d,200,40,%s,%s,%s},\n",
+                e->kind, e->text, ey, oc, ok, och);
+        ey += 60;
+    }
+    fprintf(f, "};\n");
+    fprintf(f, "#define NS_UI_ELEM_COUNT %d\n\n", count);
+    /* SDL2 event loop + main */
+    fprintf(f,
+"int main(void) {\n"
+"    if(SDL_Init(SDL_INIT_VIDEO)<0) return 1;\n"
+"    SDL_Window *win=SDL_CreateWindow(\"%s\",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,%d,%d,SDL_WINDOW_SHOWN);\n"
+"    if(!win){SDL_Quit();return 1;}\n"
+"    SDL_Renderer *rend=SDL_CreateRenderer(win,-1,SDL_RENDERER_ACCELERATED);\n"
+"    if(!rend){SDL_DestroyWindow(win);SDL_Quit();return 1;}\n"
+"    int running=1;\n"
+"    while(running){\n"
+"        SDL_Event ev;\n"
+"        while(SDL_PollEvent(&ev)){\n"
+"            if(ev.type==SDL_QUIT) running=0;\n"
+"            if(ev.type==SDL_MOUSEBUTTONDOWN){\n"
+"                int mx=ev.button.x,my=ev.button.y;\n"
+"                for(int i=0;i<NS_UI_ELEM_COUNT;i++){\n"
+"                    NSUIElem*e=&ns_ui_elems[i];\n"
+"                    if(e->onclick&&mx>=e->x&&mx<e->x+e->w&&my>=e->y&&my<e->y+e->h)\n"
+"                        e->onclick();\n"
+"                }\n"
+"            }\n"
+"            if(ev.type==SDL_KEYDOWN){\n"
+"                for(int i=0;i<NS_UI_ELEM_COUNT;i++)\n"
+"                    if(ns_ui_elems[i].onkey) ns_ui_elems[i].onkey();\n"
+"            }\n"
+"        }\n"
+"        SDL_SetRenderDrawColor(rend,30,30,30,255);\n"
+"        SDL_RenderClear(rend);\n"
+"        ns_render_all(rend,ns_ui_elems,NS_UI_ELEM_COUNT);\n"
+"        SDL_RenderPresent(rend);\n"
+"        SDL_Delay(16);\n"
+"    }\n"
+"    SDL_DestroyRenderer(rend);\n"
+"    SDL_DestroyWindow(win);\n"
+"    SDL_Quit();\n"
+"    return 0;\n"
+"}\n",
+        title, win_w, win_h);
+}
+
+static int llg_write_and_link_ui(LG *g, const char *output_path, Node *prog) {
+    LGUIElem elems[LG_UI_MAX_ELEMS];
+    int count = 0;
+    const char *title = "NightScript App";
+    int win_w = 800, win_h = 600;
+
+    for (int i = 0; i < prog->as.program.decls.count; i++) {
+        Node *d = prog->as.program.decls.items[i];
+        if (d->kind == NODE_UI_APP) {
+            if (d->as.ui_app.name) title = d->as.ui_app.name;
+            for (int j = 0; j < d->as.ui_app.children.count; j++) {
+                Node *ch = d->as.ui_app.children.items[j];
+                if (ch->kind == NODE_UI_ELEMENT &&
+                    ch->as.ui_element.elem_kind == UI_ELEM_WINDOW) {
+                    /* extract window title/size from properties */
+                    if (ch->as.ui_element.text && ch->as.ui_element.text[0])
+                        title = ch->as.ui_element.text;
+                    for (int k = 0; k < ch->as.ui_element.properties.count; k++) {
+                        Node *p = ch->as.ui_element.properties.items[k];
+                        if (!strcmp(p->as.ui_property.name, "width") &&
+                            p->as.ui_property.value &&
+                            p->as.ui_property.value->kind == NODE_LIT_INT)
+                            win_w = (int)p->as.ui_property.value->as.lit_int.value;
+                        if (!strcmp(p->as.ui_property.name, "height") &&
+                            p->as.ui_property.value &&
+                            p->as.ui_property.value->kind == NODE_LIT_INT)
+                            win_h = (int)p->as.ui_property.value->as.lit_int.value;
+                    }
+                }
+                llg_ui_collect(ch, elems, &count);
+            }
+        }
+    }
+
+    /* write object file */
+    char obj_path[4096], ui_rt_path[4096];
+    snprintf(obj_path,    sizeof(obj_path),    "%s.llvm.o",  output_path);
+    snprintf(ui_rt_path,  sizeof(ui_rt_path),  "%s.ui_rt.c", output_path);
+
+    char *emit_err = NULL;
+    if (LLVMTargetMachineEmitToFile(g->tm, g->mod, obj_path, LLVMObjectFile, &emit_err)) {
+        fprintf(stderr, "llvmgen: emit failed: %s\n", emit_err ? emit_err : "");
+        if (emit_err) LLVMDisposeMessage(emit_err);
+        return 0;
+    }
+
+    /* write UI C runtime */
+    FILE *f = fopen(ui_rt_path, "wb");
+    if (!f) { remove(obj_path); return 0; }
+    llg_write_ui_runtime(f, elems, count, title, win_w, win_h);
+    fclose(f);
+
+    /* link: obj + ui_rt with SDL2 */
+    const char *cc = getenv("CC");
+    if (!cc || !cc[0]) cc = "gcc";
+    char cmd[16384];
+    snprintf(cmd, sizeof(cmd),
+             "%s -no-pie -o \"%s\" \"%s\" \"%s\" -lSDL2",
+             cc, output_path, obj_path, ui_rt_path);
+    int rc = system(cmd);
+    remove(obj_path);
+    remove(ui_rt_path);
+    if (rc != 0) { fprintf(stderr, "llvmgen: UI link failed\n"); return 0; }
+    return 1;
 }
 
 /* ── optimization ────────────────────────────────────────────────────────── */
@@ -2264,10 +3030,9 @@ static const char *k_runtime_c =
 "void NS_println_f64(double v)   { printf(\"%g\\n\",v); }\n"
 "void NS_println_bool(int v)     { puts(v?\"true\":\"false\"); }\n"
 "void NS_println_char(int v)     { printf(\"%c\\n\",v); }\n"
-"NString NS_string_from(NStr s) {\n"
-"    NString r; r.len=s.len; r.cap=s.len+1;\n"
-"    r.ptr=malloc(r.cap); if(r.ptr){memcpy(r.ptr,s.ptr,s.len);r.ptr[s.len]=0;}\n"
-"    return r;\n"
+"void NS_string_from(NString *out, NStr s) {\n"
+"    out->len=s.len; out->cap=s.len+1;\n"
+"    out->ptr=malloc(out->cap); if(out->ptr){memcpy(out->ptr,s.ptr,s.len);out->ptr[s.len]=0;}\n"
 "}\n"
 "NStr NS_string_as_str(NString *s) { NStr r={s->ptr,s->len}; return r; }\n"
 "void NS_string_free(NString *s)   { free(s->ptr); s->ptr=NULL; s->len=s->cap=0; }\n"
@@ -2279,7 +3044,18 @@ static const char *k_runtime_c =
 "int64_t NS_string_len(NString *s) { return (int64_t)s->len; }\n"
 "void *NS_alloc(int64_t sz) { return malloc((size_t)sz); }\n"
 "void  NS_free(void *p)     { free(p); }\n"
-"void  NS_exit(int code)    { exit(code); }\n";
+"void  NS_exit(int code)    { exit(code); }\n"
+"void ns_io_print_i32(int32_t v)  { printf(\"%d\",v); }\n"
+"void ns_io_print_i64(int64_t v)  { printf(\"%lld\",(long long)v); }\n"
+"void ns_io_print_u32(uint32_t v) { printf(\"%u\",v); }\n"
+"void ns_io_print_u64(uint64_t v) { printf(\"%llu\",(unsigned long long)v); }\n"
+"void ns_io_print_f64(double v)   { printf(\"%g\",v); }\n"
+"void ns_io_print_bool(int v)     { fputs(v?\"true\":\"false\",stdout); }\n"
+"int32_t ns_io_read_i32(void)     { int32_t v=0; scanf(\"%d\",&v); return v; }\n"
+"const char *ns_io_readln(void) {\n"
+"    static char buf[4096]; if(!fgets(buf,sizeof(buf),stdin)) buf[0]=0;\n"
+"    size_t l=strlen(buf); if(l>0&&buf[l-1]=='\\n') buf[l-1]=0; return buf;\n"
+"}\n";
 
 static int llg_write_runtime(const char *path) {
     FILE *f = fopen(path, "wb");
@@ -2390,8 +3166,17 @@ int llvmgen_generate(Node *program, const char *output_path, const LLVMGenOption
 
     /* ── pass 4: declare all runtime helpers + user functions ── */
     llg_declare_runtime(&g);
-    for (int i = 0; i < program->as.program.decls.count; i++)
-        llg_declare_fn(&g, program->as.program.decls.items[i]);
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        llg_declare_fn(&g, d);
+        if (d->kind == NODE_IMPL_DECL) {
+            for (int j = 0; j < d->as.impl.methods.count; j++)
+                llg_declare_fn(&g, d->as.impl.methods.items[j]);
+        }
+    }
+
+    /* ── pass 4b: interface vtable types + coercion fns ── */
+    llg_setup_interfaces(&g);
 
     /* ── pass 5: comptime constants ── */
     llg_emit_comptime(&g, program);
@@ -2399,7 +3184,7 @@ int llvmgen_generate(Node *program, const char *output_path, const LLVMGenOption
     /* ── pass 6: instantiate generics ── */
     llg_instantiate_generics(&g);
 
-    /* ── pass 7: emit all function bodies ── */
+    /* ── pass 7: emit all function bodies + UI handlers ── */
     for (int i = 0; i < program->as.program.decls.count; i++) {
         Node *d = program->as.program.decls.items[i];
         if (d->kind==NODE_FN_DECL && d->as.fn.type_params.count==0)
@@ -2409,6 +3194,8 @@ int llvmgen_generate(Node *program, const char *output_path, const LLVMGenOption
                 llg_emit_fn(&g, d->as.impl.methods.items[j]);
         }
     }
+    if (llg_prog_has_ui(program))
+        llg_emit_ui_handlers(&g, program);
 
     /* pop global scope */
     lg_pop_scope(&g);
@@ -2430,14 +3217,22 @@ int llvmgen_generate(Node *program, const char *output_path, const LLVMGenOption
 
     /* ── emit ── */
     if (opts && opts->emit_ir) {
-        /* write .ll text */
+        /* write .ll text to file (or return as string if output_path is NULL) */
         char *ir = LLVMPrintModuleToString(mod);
-        FILE *f = fopen(output_path, "wb");
-        if (f) { fputs(ir, f); fclose(f); ok = 1; }
-        else fprintf(stderr, "llvmgen: cannot write '%s'\n", output_path);
+        if (output_path) {
+            FILE *f = fopen(output_path, "wb");
+            if (f) { fputs(ir, f); fclose(f); ok = 1; }
+            else fprintf(stderr, "llvmgen: cannot write '%s'\n", output_path);
+        } else {
+            /* caller will retrieve via llvmgen_emit_ir */
+            ok = 1;
+        }
         LLVMDisposeMessage(ir);
+    } else if (llg_prog_has_ui(program)) {
+        /* UI program: link LLVM obj + SDL2 C runtime */
+        ok = llg_write_and_link_ui(&g, output_path, program);
     } else {
-        /* emit .o, write runtime.c, link */
+        /* regular program: emit .o, write runtime.c, link */
         char obj_path[4096], rt_path[4096];
         snprintf(obj_path, sizeof(obj_path), "%s.llvm.o", output_path);
         snprintf(rt_path,  sizeof(rt_path),  "%s.rt.c",   output_path);
@@ -2461,7 +3256,9 @@ cleanup:
     /* free temp nodes */
     {
         LGTempNode *t = g.temps;
-        while (t) { LGTempNode *nx = t->next; free(t->n.as.type_named.name); free(t); t = nx; }
+        while (t) { LGTempNode *nx = t->next;
+            if (t->n.kind == NODE_TYPE_NAMED) free(t->n.as.type_named.name);
+            free(t); t = nx; }
     }
     /* free generic insts */
     {
@@ -2477,6 +3274,121 @@ cleanup:
     LLVMContextDispose(ctx);
     LLVMDisposeMessage(def_triple);
     return ok;
+}
+
+/* ── emit IR to heap-allocated string (caller must free with free()) ─────── */
+
+char *llvmgen_emit_ir(Node *program, const LLVMGenOptions *opts) {
+    if (!program || program->kind != NODE_PROGRAM) return NULL;
+
+    LLVMInitializeAllTargetInfos();
+    LLVMInitializeAllTargets();
+    LLVMInitializeAllTargetMCs();
+    LLVMInitializeAllAsmPrinters();
+
+    char *def_triple = LLVMGetDefaultTargetTriple();
+    const char *triple = (opts && opts->target_triple) ? opts->target_triple : def_triple;
+
+    LLVMTargetRef target_ref;
+    char *err_msg = NULL;
+    if (LLVMGetTargetFromTriple(triple, &target_ref, &err_msg)) {
+        fprintf(stderr, "llvmgen: no target for '%s': %s\n", triple, err_msg ? err_msg : "");
+        LLVMDisposeMessage(err_msg);
+        LLVMDisposeMessage(def_triple);
+        return NULL;
+    }
+
+    LLVMTargetMachineRef tm = LLVMCreateTargetMachine(
+        target_ref, triple,
+        LLVMGetHostCPUName(), LLVMGetHostCPUFeatures(),
+        LLVMCodeGenLevelDefault, LLVMRelocDefault, LLVMCodeModelDefault);
+
+    LLVMContextRef ctx = LLVMContextCreate();
+    LLVMModuleRef  mod = LLVMModuleCreateWithNameInContext("night_module", ctx);
+    LLVMSetTarget(mod, triple);
+    LLVMTargetDataRef td = LLVMCreateTargetDataLayout(tm);
+    LLVMSetModuleDataLayout(mod, td);
+
+    LG g;
+    memset(&g, 0, sizeof(g));
+    g.ctx = ctx; g.mod = mod; g.tm = tm; g.td = td;
+    g.program = program;
+    g.opt_level = opts ? opts->opt_level : 0;
+
+    lg_push_scope(&g);
+
+    /* passes 1-7 (same as llvmgen_generate) */
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        if (d->kind==NODE_FN_DECL && d->as.fn.type_params.count>0 && g.gfn_count<64)
+            { g.gfn_decls[g.gfn_count]=d; g.gfn_names[g.gfn_count]=d->as.fn.name; g.gfn_count++; }
+        if (d->kind==NODE_STRUCT_DECL && d->as.struct_decl.type_params.count>0 && g.gst_count<64)
+            { g.gst_decls[g.gst_count]=d; g.gst_names[g.gst_count]=d->as.struct_decl.name; g.gst_count++; }
+    }
+    llg_ns_to_ll(&g, "str"); llg_ns_to_ll(&g, "String");
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        if (d->kind==NODE_STRUCT_DECL && d->as.struct_decl.type_params.count==0) llg_setup_struct(&g, d);
+        if (d->kind==NODE_UNION_DECL)  llg_setup_union(&g, d);
+        if (d->kind==NODE_ENUM_DECL)   llg_setup_enum(&g, d);
+    }
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        if (d->kind==NODE_FN_DECL && d->as.fn.type_params.count==0) {
+            for (int j=0;j<d->as.fn.params.count;j++) llg_prescan_type(&g, d->as.fn.params.items[j]->as.let.type);
+            llg_prescan_type(&g, d->as.fn.ret_type);
+            if (d->as.fn.body) llg_prescan_stmt(&g, d->as.fn.body);
+        }
+    }
+    llg_declare_runtime(&g);
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        llg_declare_fn(&g, d);
+        if (d->kind == NODE_IMPL_DECL) {
+            for (int j = 0; j < d->as.impl.methods.count; j++)
+                llg_declare_fn(&g, d->as.impl.methods.items[j]);
+        }
+    }
+    llg_setup_interfaces(&g);
+    llg_emit_comptime(&g, program);
+    llg_instantiate_generics(&g);
+    for (int i = 0; i < program->as.program.decls.count; i++) {
+        Node *d = program->as.program.decls.items[i];
+        if (d->kind==NODE_FN_DECL && d->as.fn.type_params.count==0) llg_emit_fn(&g, d);
+        if (d->kind==NODE_IMPL_DECL) {
+            for (int j=0;j<d->as.impl.methods.count;j++) llg_emit_fn(&g, d->as.impl.methods.items[j]);
+        }
+    }
+    if (llg_prog_has_ui(program)) llg_emit_ui_handlers(&g, program);
+
+    lg_pop_scope(&g);
+
+    char *verify_err = NULL;
+    LLVMVerifyModule(mod, LLVMPrintMessageAction, &verify_err);
+    if (verify_err) LLVMDisposeMessage(verify_err);
+
+    char *llvm_ir = LLVMPrintModuleToString(mod);
+    char *result = NULL;
+    if (llvm_ir) {
+        size_t len = strlen(llvm_ir);
+        result = malloc(len + 1);
+        if (result) memcpy(result, llvm_ir, len + 1);
+        LLVMDisposeMessage(llvm_ir);
+    }
+
+    /* free temps */
+    { LGTempNode *t = g.temps; while(t){LGTempNode *nx=t->next;
+        if(t->n.kind==NODE_TYPE_NAMED)free(t->n.as.type_named.name);
+        free(t);t=nx;} }
+    { LGGFnInst *f = g.gfn_insts; while(f){LGGFnInst *nx=f->next;free(f);f=nx;}
+      LGGStInst *s = g.gst_insts; while(s){LGGStInst *nx=s->next;free(s);s=nx;} }
+
+    LLVMDisposeTargetData(td);
+    LLVMDisposeTargetMachine(tm);
+    LLVMDisposeModule(mod);
+    LLVMContextDispose(ctx);
+    LLVMDisposeMessage(def_triple);
+    return result;
 }
 
 #endif /* NIGHT_LLVM_BACKEND */

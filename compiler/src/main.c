@@ -12,13 +12,10 @@
 #include "parser/parser.h"
 #include "sema/sema.h"
 #include "typeck/typeck.h"
-#include "codegen/codegen.h"
 
 #ifdef NIGHT_LLVM_BACKEND
 #include "llvmgen/llvmgen.h"
 #endif
-
-static int g_use_llvm_backend = 0;
 
 typedef enum {
     CMD_CODEGEN,
@@ -71,10 +68,8 @@ typedef struct {
     Arena arena;
     Node *ast;
     SemanticModel sema;
-    COut codegen;
     int arena_ready;
     int sema_ready;
-    int codegen_ready;
 } CompileState;
 
 static char *dup_string(const char *text) {
@@ -190,8 +185,6 @@ static void compile_state_free(CompileState *state) {
         source_unit_free(&state->units[i]);
     free(state->units);
     free(state->root_dir);
-    if (state->codegen_ready)
-        cout_free(&state->codegen);
     if (state->sema_ready)
         sema_model_free(&state->sema);
     if (state->arena_ready)
@@ -712,7 +705,7 @@ static int init_project(const char *target_dir) {
              "\n"
              "[target]\n"
              "mode = \"native\"\n"
-             "backend = \"c\"\n"
+             "backend = \"llvm\"\n"
              "\n"
              "[build]\n"
              "entry = \"src/main.afns\"\n"
@@ -751,18 +744,10 @@ static int remove_if_exists(const char *path) {
 }
 
 static int clean_outputs(const char *src_path, const char *output_path) {
-    char *generated = NULL;
     int ok = 0;
 
     if (output_path) {
-        generated = replace_extension(output_path, ".generated.c");
-        if (!generated) {
-            fprintf(stderr, "error: out of memory\n");
-            return 0;
-        }
         if (!remove_if_exists(output_path))
-            goto cleanup;
-        if (!remove_if_exists(generated))
             goto cleanup;
         ok = 1;
         goto cleanup;
@@ -774,13 +759,7 @@ static int clean_outputs(const char *src_path, const char *output_path) {
             fprintf(stderr, "error: out of memory\n");
             return 0;
         }
-        generated = replace_extension(default_out, ".generated.c");
-        if (!generated) {
-            free(default_out);
-            fprintf(stderr, "error: out of memory\n");
-            return 0;
-        }
-        ok = remove_if_exists(default_out) && remove_if_exists(generated);
+        ok = remove_if_exists(default_out);
         free(default_out);
         goto cleanup;
     }
@@ -788,7 +767,6 @@ static int clean_outputs(const char *src_path, const char *output_path) {
     ok = 1;
 
 cleanup:
-    free(generated);
     return ok;
 }
 
@@ -1244,13 +1222,6 @@ static int compile_source(const char *path, CompileState *state) {
     if (!typeck_check(state->ast, &state->sema, path))
         return 0;
 
-    if (!g_use_llvm_backend) {
-        if (!codegen_generate(state->ast, &state->codegen)) {
-            fprintf(stderr, "codegen failed\n");
-            return 0;
-        }
-        state->codegen_ready = 1;
-    }
     return 1;
 }
 
@@ -1269,79 +1240,16 @@ static int write_text_file(const char *path, const char *text) {
     return 1;
 }
 
-static int invoke_cc(const char *c_path, const char *out_path, const char *extra_flags) {
-    const char *cc = getenv("CC");
-    char *q_cc;
-    char *q_c;
-    char *q_out;
-    char *cmd;
-    int ok = 0;
-    int rc;
-    size_t cmd_len;
-
-    if (!cc || !cc[0])
-        cc = "gcc";
-    if (!extra_flags)
-        extra_flags = "";
-
-    q_cc = shell_quote(cc);
-    q_c = shell_quote(c_path);
-    q_out = shell_quote(out_path);
-    if (!q_cc || !q_c || !q_out) {
-        fprintf(stderr, "error: out of memory\n");
-        goto cleanup;
-    }
-
-    cmd_len = strlen(q_cc) + strlen(q_c) + strlen(q_out) + strlen(extra_flags) + 64;
-    cmd = malloc(cmd_len);
-    if (!cmd) {
-        fprintf(stderr, "error: out of memory\n");
-        goto cleanup;
-    }
-
-    snprintf(cmd, cmd_len, "%s -std=c11 %s -o %s %s", q_cc, q_c, q_out, extra_flags);
-    rc = system(cmd);
-    free(cmd);
-    ok = (rc == 0);
-    if (!ok) {
-        fprintf(stderr, "error: C compiler failed for '%s'\n", c_path);
-    }
-
-cleanup:
-    free(q_cc);
-    free(q_c);
-    free(q_out);
-    return ok;
-}
-
-static int program_has_ui(CompileState *state) {
-    if (!state->ast) return 0;
-    for (int i = 0; i < state->ast->as.program.decls.count; i++)
-        if (state->ast->as.program.decls.items[i]->kind == NODE_UI_APP)
-            return 1;
-    return 0;
-}
-
-static int program_has_kernel(CompileState *state) {
-    if (!state->ast) return 0;
-    for (int i = 0; i < state->ast->as.program.decls.count; i++)
-        if (state->ast->as.program.decls.items[i]->kind == NODE_KERNEL_APP)
-            return 1;
-    return 0;
-}
 
 static int build_binary(const char *src_path, const char *binary_path,
                         const char *opt_flags) {
     CompileState state;
-    char *c_path = NULL;
-    char *extra_flags = NULL;
-    int ok = 0;
 
     if (!compile_source(src_path, &state))
         return 1;
 
 #ifdef NIGHT_LLVM_BACKEND
-    if (g_use_llvm_backend) {
+    {
         int opt = 0;
         if (opt_flags && (strstr(opt_flags, "-O2") || strstr(opt_flags, "-O3")))
             opt = 2;
@@ -1350,77 +1258,20 @@ static int build_binary(const char *src_path, const char *binary_path,
             .opt_level     = opt,
             .emit_ir       = 0,
         };
+        if (!ensure_parent_dir(binary_path)) {
+            compile_state_free(&state);
+            return 1;
+        }
         int rc = llvmgen_generate(state.ast, binary_path, &llvm_opts) ? 0 : 1;
         compile_state_free(&state);
         return rc;
     }
-#endif
-
-    /* build extra flags: opt_flags + SDL2 if UI, freestanding if kernel */
-    {
-        int is_kernel = program_has_kernel(&state);
-        const char *sdl = program_has_ui(&state) ? " -lSDL2" : "";
-        const char *kflags = is_kernel
-            ? "-ffreestanding -nostdlib -nostdinc -m32 -O2 -fno-stack-protector -fno-pic"
-            : "";
-        const char *opt = (is_kernel || opt_flags) ? (is_kernel ? "" : opt_flags) : "-g";
-        size_t len = strlen(kflags) + strlen(opt) + strlen(sdl) + 4;
-        extra_flags = malloc(len);
-        if (!extra_flags) {
-            fprintf(stderr, "error: out of memory\n");
-            compile_state_free(&state);
-            return 1;
-        }
-        if (is_kernel)
-            snprintf(extra_flags, len, "%s", kflags);
-        else
-            snprintf(extra_flags, len, "%s%s", opt, sdl);
-    }
-
-    c_path = replace_extension(binary_path, ".generated.c");
-    if (!c_path) {
-        fprintf(stderr, "error: out of memory\n");
-        goto cleanup;
-    }
-
-    if (!ensure_parent_dir(binary_path) || !ensure_parent_dir(c_path))
-        goto cleanup;
-
-    if (!write_text_file(c_path, state.codegen.buf))
-        goto cleanup;
-
-    if (!invoke_cc(c_path, binary_path, extra_flags))
-        goto cleanup;
-
-    /* write night.lock: one line per package in the program (no deps = empty lock) */
-    {
-        char *lock_path = NULL;
-        char *src_dir = path_dirname(src_path);
-        if (src_dir) {
-            char *bin_dir = path_dirname(binary_path);
-            const char *lock_dir = bin_dir ? bin_dir : src_dir;
-            lock_path = path_join(lock_dir, "night.lock");
-            free(bin_dir);
-        }
-        if (lock_path) {
-            FILE *lf = fopen(lock_path, "w");
-            if (lf) {
-                fprintf(lf, "# NightScript lock file — do not edit manually\n");
-                fprintf(lf, "version = 1\n");
-                fclose(lf);
-            }
-            free(lock_path);
-        }
-        free(src_dir);
-    }
-
-    ok = 1;
-
-cleanup:
-    free(c_path);
-    free(extra_flags);
+#else
+    (void)opt_flags;
+    fprintf(stderr, "error: LLVM backend not compiled in — rebuild with LLVM\n");
     compile_state_free(&state);
-    return ok ? 0 : 1;
+    return 1;
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -1502,22 +1353,14 @@ int main(int argc, char **argv) {
         }
 
         if (!strcmp(argv[argi], "--backend")) {
+            /* legacy flag: only "llvm" accepted, "c" is gone */
             if (argi + 1 >= argc) {
                 fprintf(stderr, "error: expected backend name after --backend\n");
                 return 1;
             }
             const char *bname = argv[argi + 1];
-            if (!strcmp(bname, "llvm")) {
-#ifdef NIGHT_LLVM_BACKEND
-                g_use_llvm_backend = 1;
-#else
-                fprintf(stderr, "error: LLVM backend not compiled in\n");
-                return 1;
-#endif
-            } else if (!strcmp(bname, "c")) {
-                g_use_llvm_backend = 0;
-            } else {
-                fprintf(stderr, "error: unknown backend '%s' (choices: c, llvm)\n", bname);
+            if (strcmp(bname, "llvm") != 0) {
+                fprintf(stderr, "error: unknown backend '%s' (only 'llvm' is supported)\n", bname);
                 return 1;
             }
             argi += 2;
@@ -1525,7 +1368,6 @@ int main(int argc, char **argv) {
         }
 
         if (!strcmp(argv[argi], "--emit-ir")) {
-            /* handled later via env / opts */
             argi++;
             continue;
         }
@@ -1689,7 +1531,16 @@ int main(int argc, char **argv) {
             } else if (cmd == CMD_CHECK) {
                 printf("OK\n");
             } else {
-                printf("%s", state.codegen.buf);
+                /* CMD_CODEGEN: emit LLVM IR to stdout */
+#ifdef NIGHT_LLVM_BACKEND
+                LLVMGenOptions ir_opts = { NULL, 0, 1 };
+                char *ir = llvmgen_emit_ir(state.ast, &ir_opts);
+                if (ir) { printf("%s", ir); free(ir); }
+                else { fprintf(stderr, "error: IR emission failed\n"); rc = 1; }
+#else
+                fprintf(stderr, "error: LLVM backend not compiled in\n");
+                rc = 1;
+#endif
             }
 
             compile_state_free(&state);

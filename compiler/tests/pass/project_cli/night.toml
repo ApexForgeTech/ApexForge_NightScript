@@ -3,7 +3,7 @@ name = "project_cli"
 
 [target]
 mode = "native"
-backend = "c"
+backend = "llvm"
 
 [build]
 entry = "src/main.afns"

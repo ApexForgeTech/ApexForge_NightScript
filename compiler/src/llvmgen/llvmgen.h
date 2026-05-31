@@ -20,5 +20,12 @@ typedef struct {
 int llvmgen_generate(Node *program, const char *output_path,
                      const LLVMGenOptions *opts);
 
+/*
+ * Emit LLVM IR text as a heap-allocated C string.
+ * Caller must free() the returned string.
+ * Returns NULL on error.
+ */
+char *llvmgen_emit_ir(Node *program, const LLVMGenOptions *opts);
+
 #endif /* NIGHT_LLVM_BACKEND */
 #endif /* NIGHT_LLVMGEN_H */

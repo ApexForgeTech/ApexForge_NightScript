@@ -1,7 +1,7 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -pedantic -g \
           -Isrc -Isrc/lexer -Isrc/parser -Isrc/common \
-          -Isrc/sema -Isrc/typeck -Isrc/codegen -Isrc/llvmgen
+          -Isrc/sema -Isrc/typeck -Isrc/llvmgen
 DEPFLAGS = -MMD -MP
 
 BUILD_DIR = build
@@ -14,8 +14,7 @@ SRC       = src/main.c \
             src/parser/parser.c \
             src/parser/ast_dump.c \
             src/sema/sema.c \
-            src/typeck/typeck.c \
-            src/codegen/codegen.c
+            src/typeck/typeck.c
 
 OBJ       = $(SRC:src/%.c=$(OBJ_DIR)/%.o)
 DEP       = $(OBJ:.o=.d)
