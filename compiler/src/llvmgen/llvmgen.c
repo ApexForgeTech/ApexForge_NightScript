@@ -1,6 +1,4 @@
-/* llvmgen.c — NightScript v0.8 LLVM backend */
-#ifdef NIGHT_LLVM_BACKEND
-
+/* llvmgen.c — NightScript LLVM backend */
 #include "llvmgen.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/Analysis.h>
@@ -2626,7 +2624,23 @@ static void llg_setup_interfaces(LG *g) {
     }
 }
 
-/* ── UI element collection (v0.8.2) ─────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════
+   v0.8.2 ��� LLVM UI Backend (SDL2)
+   ══════════════════════════════════════════════════════════════════════════
+   Architecture:
+     • NightScript handler functions compiled to LLVM IR with typed event args
+     • SDL2 functions declared as LLVM extern so handlers can call SDL2 directly
+     • C SDL2 runtime (ui_rt.c): init/event-loop/render — compiled + linked
+     • Handler signatures:
+         onclick(i32 mouse_x, i32 mouse_y)
+         onkey(i32 keycode, i32 scancode, i32 mod)
+         onchange(ptr text)
+     • Runtime helper API (declared in LLVM IR, defined in ui_rt.c):
+         ns_ui_set_label_text(i32 elem_idx, ptr text)
+         ns_ui_set_button_text(i32 elem_idx, ptr text)
+         ns_ui_get_input_text(i32 elem_idx) -> ptr
+         ns_ui_close()
+   ══════════════════════════════════════════════════════════════════════════ */
 
 #define LG_UI_MAX_ELEMS 128
 
@@ -2667,20 +2681,105 @@ static void llg_ui_collect(Node *n, LGUIElem *elems, int *count) {
         llg_ui_collect(n->as.ui_element.children.items[i], elems, count);
 }
 
+/* Declare SDL2 functions + UI runtime API in the LLVM module.
+   Called once per UI program before handler emission. */
+static void llg_declare_ui_runtime(LG *g) {
+    LLVMContextRef ctx = g->ctx;
+    LLVMTypeRef void_ty = LLVMVoidTypeInContext(ctx);
+    LLVMTypeRef i32_ty  = LLVMInt32TypeInContext(ctx);
+    LLVMTypeRef ptr_ty  = LLVMPointerTypeInContext(ctx, 0);
+
+    struct { const char *nm; LLVMTypeRef *ptys; unsigned np; LLVMTypeRef ret; } ui_rt[] = {
+        /* SDL2 display / window */
+        {"SDL_Init",            (LLVMTypeRef[]){i32_ty},            1, i32_ty},
+        {"SDL_Quit",            NULL,                               0, void_ty},
+        {"SDL_CreateWindow",    (LLVMTypeRef[]){ptr_ty,i32_ty,i32_ty,i32_ty,i32_ty,i32_ty}, 6, ptr_ty},
+        {"SDL_DestroyWindow",   (LLVMTypeRef[]){ptr_ty},            1, void_ty},
+        {"SDL_CreateRenderer",  (LLVMTypeRef[]){ptr_ty,i32_ty,i32_ty}, 3, ptr_ty},
+        {"SDL_DestroyRenderer", (LLVMTypeRef[]){ptr_ty},            1, void_ty},
+        {"SDL_RenderPresent",   (LLVMTypeRef[]){ptr_ty},            1, void_ty},
+        {"SDL_RenderClear",     (LLVMTypeRef[]){ptr_ty},            1, i32_ty},
+        {"SDL_SetRenderDrawColor",(LLVMTypeRef[]){ptr_ty,i32_ty,i32_ty,i32_ty,i32_ty}, 5, i32_ty},
+        {"SDL_RenderFillRect",  (LLVMTypeRef[]){ptr_ty,ptr_ty},     2, i32_ty},
+        {"SDL_RenderDrawRect",  (LLVMTypeRef[]){ptr_ty,ptr_ty},     2, i32_ty},
+        {"SDL_RenderDrawPoint", (LLVMTypeRef[]){ptr_ty,i32_ty,i32_ty}, 3, i32_ty},
+        {"SDL_PollEvent",       (LLVMTypeRef[]){ptr_ty},            1, i32_ty},
+        {"SDL_Delay",           (LLVMTypeRef[]){i32_ty},            1, void_ty},
+        {"SDL_GetTicks",        NULL,                               0, i32_ty},
+        {"SDL_Log",             (LLVMTypeRef[]){ptr_ty},            1, void_ty},
+        /* NightScript UI runtime helpers (defined in ui_rt.c) */
+        {"ns_ui_set_label_text",  (LLVMTypeRef[]){i32_ty, ptr_ty}, 2, void_ty},
+        {"ns_ui_set_button_text", (LLVMTypeRef[]){i32_ty, ptr_ty}, 2, void_ty},
+        {"ns_ui_get_input_text",  (LLVMTypeRef[]){i32_ty},         1, ptr_ty},
+        {"ns_ui_close",           NULL,                             0, void_ty},
+        {NULL, NULL, 0, NULL}
+    };
+    for (int i = 0; ui_rt[i].nm; i++) {
+        if (lg_find_global(g, ui_rt[i].nm)) continue;
+        LLVMTypeRef fn_ty = LLVMFunctionType(ui_rt[i].ret,
+                                              ui_rt[i].ptys ? ui_rt[i].ptys : NULL,
+                                              ui_rt[i].np, 0);
+        LLVMValueRef fn_val = LLVMAddFunction(g->mod, ui_rt[i].nm, fn_ty);
+        LLVMSetLinkage(fn_val, LLVMExternalLinkage);
+        lg_add_global(g, ui_rt[i].nm, fn_val, fn_ty, NULL, NULL);
+    }
+}
+
+/* Emit a handler function with typed event parameters:
+     onclick  → fn(i32 mouse_x, i32 mouse_y)
+     onkey    → fn(i32 keycode, i32 scancode, i32 mod)
+     onchange → fn(ptr text) */
 static void llg_ui_emit_handler(LG *g, int idx, const char *hkind, Node *body) {
+    LLVMContextRef ctx = g->ctx;
+    LLVMTypeRef i32_ty = LLVMInt32TypeInContext(ctx);
+    LLVMTypeRef ptr_ty = LLVMPointerTypeInContext(ctx, 0);
+    LLVMTypeRef void_ty = LLVMVoidTypeInContext(ctx);
+
     char name[128];
     snprintf(name, sizeof(name), "ns_handler_%d_%s", idx, hkind);
-    LLVMTypeRef fn_ty = LLVMFunctionType(LLVMVoidTypeInContext(g->ctx), NULL, 0, 0);
+
+    /* Build parameter list based on handler kind */
+    LLVMTypeRef ptys[4];
+    unsigned np = 0;
+    const char *pnames[4] = {NULL};
+    if (!strcmp(hkind, "onclick")) {
+        ptys[0] = i32_ty; pnames[0] = "mouse_x";
+        ptys[1] = i32_ty; pnames[1] = "mouse_y";
+        np = 2;
+    } else if (!strcmp(hkind, "onkey")) {
+        ptys[0] = i32_ty; pnames[0] = "keycode";
+        ptys[1] = i32_ty; pnames[1] = "scancode";
+        ptys[2] = i32_ty; pnames[2] = "mod";
+        np = 3;
+    } else if (!strcmp(hkind, "onchange")) {
+        ptys[0] = ptr_ty; pnames[0] = "text";
+        np = 1;
+    }
+
+    LLVMTypeRef fn_ty = LLVMFunctionType(void_ty, ptys, np, 0);
     LLVMValueRef fn = LLVMAddFunction(g->mod, name, fn_ty);
-    LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(g->ctx, fn, "entry");
-    LLVMBuilderRef b = LLVMCreateBuilderInContext(g->ctx);
+
+    /* Bind event parameters into handler scope */
+    LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, fn, "entry");
+    LLVMBuilderRef b = LLVMCreateBuilderInContext(ctx);
     LLVMPositionBuilderAtEnd(b, entry);
+
     LLVMValueRef prev_fn = g->cur_fn;
     Node *prev_ret = g->cur_ret_ty;
     g->cur_fn = fn;
     g->cur_ret_ty = NULL;
     lg_push_scope(g);
     LLVMBasicBlockRef cur_bb = entry;
+
+    /* Alloca + store each event param so body can reference them */
+    for (unsigned pi = 0; pi < np; pi++) {
+        LLVMValueRef param = LLVMGetParam(fn, pi);
+        LLVMSetValueName2(param, pnames[pi], strlen(pnames[pi]));
+        LLVMValueRef alloca = lg_alloca(g, b, ptys[pi], pnames[pi]);
+        LLVMBuildStore(b, param, alloca);
+        lg_define(g, pnames[pi], alloca, ptys[pi], NULL);
+    }
+
     if (body) llg_emit_block(g, b, &cur_bb, body);
     lg_pop_scope(g);
     if (!LLVMGetBasicBlockTerminator(cur_bb)) LLVMBuildRetVoid(b);
@@ -2690,6 +2789,9 @@ static void llg_ui_emit_handler(LG *g, int idx, const char *hkind, Node *body) {
 }
 
 static void llg_emit_ui_handlers(LG *g, Node *prog) {
+    /* First declare SDL2 + UI runtime helpers in the LLVM module */
+    llg_declare_ui_runtime(g);
+
     LGUIElem elems[LG_UI_MAX_ELEMS];
     int count = 0;
     for (int i = 0; i < prog->as.program.decls.count; i++) {
@@ -2814,6 +2916,19 @@ static const unsigned char k_ui_font[96][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* DEL */
 };
 
+/* ── v0.8.2 SDL2 C runtime (compiled alongside LLVM IR .o) ────────────────
+   This file is generated as <output>.ui_rt.c and compiled with gcc + -lSDL2.
+   It provides:
+     - SDL2 event loop with typed handler callbacks
+     - 8x8 bitmap font rendering
+     - Widget rendering (button, label, input, row/column layouts)
+     - UI helper API: ns_ui_set_label_text, ns_ui_get_input_text, ns_ui_close
+   Handler extern signatures match llg_ui_emit_handler:
+     onclick(int mx, int my)
+     onkey(int keycode, int scancode, int mod)
+     onchange(const char *text)
+   ─────────────────────────────────────────────────────────────────────────── */
+
 /* Static SDL2 render helpers (font-dependent, widget-drawing) */
 static const char *k_ui_sdl2_c =
 "static void ns_draw_char(SDL_Renderer*r,int x,int y,char c,Uint8 R,Uint8 G,Uint8 B){\n"
@@ -2849,30 +2964,48 @@ static const char *k_ui_sdl2_c =
 "        NSUIElem*e=&elems[i];\n"
 "        if(e->kind==1) ns_render_button(r,e->x,e->y,e->w,e->h,e->text);\n"
 "        else if(e->kind==2) ns_render_label(r,e->x,e->y,e->w,e->h,e->text);\n"
-"        else if(e->kind==3) ns_render_input(r,e->x,e->y,e->w,e->h,e->text);\n"
+"        else if(e->kind==3) {\n"
+"            /* show input_buf if non-empty, else placeholder */\n"
+"            const char *disp=e->input_buf[0]?e->input_buf:e->text;\n"
+"            ns_render_input(r,e->x,e->y,e->w,e->h,disp);\n"
+"        }\n"
 "    }\n"
 "}\n";
 
 static void llg_write_ui_runtime(FILE *f, LGUIElem *elems, int count,
                                   const char *title, int win_w, int win_h) {
-    /* includes */
-    fprintf(f, "#include <SDL2/SDL.h>\n#include <string.h>\n\n");
-    /* handler externs */
+    /* ── includes ── */
+    fprintf(f,
+        "#include <SDL2/SDL.h>\n"
+        "#include <string.h>\n"
+        "#include <stdlib.h>\n"
+        "#include <stdio.h>\n\n");
+
+    /* ── handler extern declarations (typed signatures) ── */
     for (int i = 0; i < count; i++) {
         if (elems[i].has_onclick)
-            fprintf(f, "extern void ns_handler_%d_onclick(void);\n", i);
+            fprintf(f, "extern void ns_handler_%d_onclick(int mx, int my);\n", i);
         if (elems[i].has_onkey)
-            fprintf(f, "extern void ns_handler_%d_onkey(void);\n", i);
+            fprintf(f, "extern void ns_handler_%d_onkey(int keycode, int scancode, int mod);\n", i);
         if (elems[i].has_onchange)
-            fprintf(f, "extern void ns_handler_%d_onchange(void);\n", i);
+            fprintf(f, "extern void ns_handler_%d_onchange(const char *text);\n", i);
     }
     fprintf(f, "\n");
-    /* NSUIElem typedef */
-    fprintf(f, "typedef struct {\n");
-    fprintf(f, "    int kind; char *text; int x,y,w,h;\n");
-    fprintf(f, "    void(*onclick)(void); void(*onkey)(void); void(*onchange)(void);\n");
-    fprintf(f, "} NSUIElem;\n\n");
-    /* font */
+
+    /* ── NSUIElem struct ── */
+    fprintf(f,
+        "typedef struct {\n"
+        "    int kind;           /* 1=button 2=label 3=input */\n"
+        "    char text[512];     /* display text */\n"
+        "    char input_buf[512];/* for input elements */\n"
+        "    int x,y,w,h;        /* bounding box */\n"
+        "    int focused;        /* keyboard focus */\n"
+        "    void(*onclick)(int,int);\n"
+        "    void(*onkey)(int,int,int);\n"
+        "    void(*onchange)(const char*);\n"
+        "} NSUIElem;\n\n");
+
+    /* ── 8x8 bitmap font ── */
     fprintf(f, "static const unsigned char ns_font8x8[96][8] = {\n");
     for (int i = 0; i < 96; i++) {
         fprintf(f, "  {0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X,0x%02X},\n",
@@ -2880,55 +3013,132 @@ static void llg_write_ui_runtime(FILE *f, LGUIElem *elems, int count,
                 k_ui_font[i][4], k_ui_font[i][5], k_ui_font[i][6], k_ui_font[i][7]);
     }
     fprintf(f, "};\n\n");
-    /* draw helpers */
+
+    /* ── draw helpers ── */
     fputs(k_ui_sdl2_c, f);
-    /* element table */
-    fprintf(f, "static NSUIElem ns_ui_elems[] = {\n");
-    int ey = 60;
+
+    /* ── element table ── */
+    /* Auto-layout: stack vertically with padding */
+    fprintf(f, "static NSUIElem ns_ui_elems[%d] = {\n", count > 0 ? count : 1);
+    int pad_x = 20, pad_y = 20, gap = 14;
+    int btn_h = 36, lbl_h = 28, inp_h = 36;
+    int ey = pad_y;
     for (int i = 0; i < count; i++) {
         LGUIElem *e = &elems[i];
+        int eh = (e->kind == UI_ELEM_BUTTON) ? btn_h :
+                 (e->kind == UI_ELEM_INPUT)  ? inp_h : lbl_h;
+        int ew = win_w - pad_x * 2;
         char oc[64], ok[64], och[64];
         snprintf(oc,  sizeof(oc),  e->has_onclick  ? "ns_handler_%d_onclick"  : "0", i);
         snprintf(ok,  sizeof(ok),  e->has_onkey    ? "ns_handler_%d_onkey"    : "0", i);
-        snprintf(och, sizeof(och), e->has_onchange  ? "ns_handler_%d_onchange" : "0", i);
-        fprintf(f, "  {%d,\"%s\",20,%d,200,40,%s,%s,%s},\n",
-                e->kind, e->text, ey, oc, ok, och);
-        ey += 60;
+        snprintf(och, sizeof(och), e->has_onchange ? "ns_handler_%d_onchange" : "0", i);
+        /* Escape text for C string literal */
+        char safe_text[512];
+        const char *src = e->text;
+        char *dst = safe_text;
+        while (*src && dst < safe_text + sizeof(safe_text) - 2) {
+            if (*src == '"' || *src == '\\') *dst++ = '\\';
+            *dst++ = *src++;
+        }
+        *dst = '\0';
+        fprintf(f, "  {%d,\"%s\",\"\", %d,%d,%d,%d, 0, %s,%s,%s},\n",
+                e->kind, safe_text, pad_x, ey, ew, eh, oc, ok, och);
+        ey += eh + gap;
     }
     fprintf(f, "};\n");
     fprintf(f, "#define NS_UI_ELEM_COUNT %d\n\n", count);
-    /* SDL2 event loop + main */
+
+    /* ── UI runtime helper API ── */
+    fprintf(f,
+        "/* Runtime helpers callable from NightScript handlers */\n"
+        "void ns_ui_set_label_text(int idx, const char *text) {\n"
+        "    if(idx>=0&&idx<NS_UI_ELEM_COUNT) {\n"
+        "        strncpy(ns_ui_elems[idx].text, text, sizeof(ns_ui_elems[0].text)-1);\n"
+        "    }\n"
+        "}\n"
+        "void ns_ui_set_button_text(int idx, const char *text) {\n"
+        "    if(idx>=0&&idx<NS_UI_ELEM_COUNT) {\n"
+        "        strncpy(ns_ui_elems[idx].text, text, sizeof(ns_ui_elems[0].text)-1);\n"
+        "    }\n"
+        "}\n"
+        "const char *ns_ui_get_input_text(int idx) {\n"
+        "    if(idx>=0&&idx<NS_UI_ELEM_COUNT) return ns_ui_elems[idx].input_buf;\n"
+        "    return \"\";\n"
+        "}\n"
+        "static int ns_ui_running = 1;\n"
+        "void ns_ui_close(void) { ns_ui_running = 0; }\n\n");
+
+    /* ── SDL2 event loop + main ── */
     fprintf(f,
 "int main(void) {\n"
-"    if(SDL_Init(SDL_INIT_VIDEO)<0) return 1;\n"
-"    SDL_Window *win=SDL_CreateWindow(\"%s\",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,%d,%d,SDL_WINDOW_SHOWN);\n"
+"    if(SDL_Init(SDL_INIT_VIDEO)<0){fprintf(stderr,\"SDL_Init: %%s\\n\",SDL_GetError());return 1;}\n"
+"    SDL_Window *win=SDL_CreateWindow(\"%s\",\n"
+"        SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,%d,%d,\n"
+"        SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE);\n"
 "    if(!win){SDL_Quit();return 1;}\n"
-"    SDL_Renderer *rend=SDL_CreateRenderer(win,-1,SDL_RENDERER_ACCELERATED);\n"
+"    SDL_Renderer *rend=SDL_CreateRenderer(win,-1,\n"
+"        SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);\n"
 "    if(!rend){SDL_DestroyWindow(win);SDL_Quit();return 1;}\n"
-"    int running=1;\n"
-"    while(running){\n"
+"    SDL_StartTextInput();\n"
+"    int focused_elem=-1;\n"
+"    while(ns_ui_running){\n"
 "        SDL_Event ev;\n"
 "        while(SDL_PollEvent(&ev)){\n"
-"            if(ev.type==SDL_QUIT) running=0;\n"
-"            if(ev.type==SDL_MOUSEBUTTONDOWN){\n"
+"            if(ev.type==SDL_QUIT) ns_ui_running=0;\n"
+/* Mouse click — dispatch onclick + set focus */
+"            if(ev.type==SDL_MOUSEBUTTONDOWN&&ev.button.button==SDL_BUTTON_LEFT){\n"
 "                int mx=ev.button.x,my=ev.button.y;\n"
+"                focused_elem=-1;\n"
 "                for(int i=0;i<NS_UI_ELEM_COUNT;i++){\n"
 "                    NSUIElem*e=&ns_ui_elems[i];\n"
-"                    if(e->onclick&&mx>=e->x&&mx<e->x+e->w&&my>=e->y&&my<e->y+e->h)\n"
-"                        e->onclick();\n"
+"                    if(mx>=e->x&&mx<e->x+e->w&&my>=e->y&&my<e->y+e->h){\n"
+"                        if(e->kind==3) focused_elem=i;\n"
+"                        if(e->onclick) e->onclick(mx,my);\n"
+"                        break;\n"
+"                    }\n"
 "                }\n"
 "            }\n"
+/* Keyboard — dispatch onkey for focused element; also update input buffer */
 "            if(ev.type==SDL_KEYDOWN){\n"
-"                for(int i=0;i<NS_UI_ELEM_COUNT;i++)\n"
-"                    if(ns_ui_elems[i].onkey) ns_ui_elems[i].onkey();\n"
+"                int kc=(int)ev.key.keysym.sym;\n"
+"                int sc=(int)ev.key.keysym.scancode;\n"
+"                int md=(int)ev.key.keysym.mod;\n"
+"                if(focused_elem>=0&&focused_elem<NS_UI_ELEM_COUNT){\n"
+"                    NSUIElem*fe=&ns_ui_elems[focused_elem];\n"
+"                    if(kc==SDLK_BACKSPACE){\n"
+"                        size_t l=strlen(fe->input_buf);\n"
+"                        if(l>0){ fe->input_buf[l-1]=0;\n"
+"                            if(fe->onchange) fe->onchange(fe->input_buf); }\n"
+"                    }\n"
+"                    if(fe->onkey) fe->onkey(kc,sc,md);\n"
+"                } else {\n"
+"                    for(int i=0;i<NS_UI_ELEM_COUNT;i++)\n"
+"                        if(ns_ui_elems[i].onkey) ns_ui_elems[i].onkey(kc,sc,md);\n"
+"                }\n"
+"            }\n"
+/* Text input — append to focused input buffer */
+"            if(ev.type==SDL_TEXTINPUT&&focused_elem>=0){\n"
+"                NSUIElem*fe=&ns_ui_elems[focused_elem];\n"
+"                if(fe->kind==3){\n"
+"                    strncat(fe->input_buf,ev.text.text,sizeof(fe->input_buf)-strlen(fe->input_buf)-1);\n"
+"                    if(fe->onchange) fe->onchange(fe->input_buf);\n"
+"                }\n"
 "            }\n"
 "        }\n"
-"        SDL_SetRenderDrawColor(rend,30,30,30,255);\n"
+/* Render */
+"        SDL_SetRenderDrawColor(rend,20,20,28,255);\n"
 "        SDL_RenderClear(rend);\n"
 "        ns_render_all(rend,ns_ui_elems,NS_UI_ELEM_COUNT);\n"
+/* Highlight focused input */
+"        if(focused_elem>=0&&focused_elem<NS_UI_ELEM_COUNT){\n"
+"            NSUIElem*fe=&ns_ui_elems[focused_elem];\n"
+"            SDL_SetRenderDrawColor(rend,80,160,255,255);\n"
+"            SDL_Rect fr={fe->x-2,fe->y-2,fe->w+4,fe->h+4};\n"
+"            SDL_RenderDrawRect(rend,&fr);\n"
+"        }\n"
 "        SDL_RenderPresent(rend);\n"
-"        SDL_Delay(16);\n"
 "    }\n"
+"    SDL_StopTextInput();\n"
 "    SDL_DestroyRenderer(rend);\n"
 "    SDL_DestroyWindow(win);\n"
 "    SDL_Quit();\n"
@@ -2989,17 +3199,37 @@ static int llg_write_and_link_ui(LG *g, const char *output_path, Node *prog) {
     llg_write_ui_runtime(f, elems, count, title, win_w, win_h);
     fclose(f);
 
-    /* link: obj + ui_rt with SDL2 */
+    /* link: obj + ui_rt with SDL2
+       SDL2 packages may need: -lSDL2 -lm or SDL2-config --libs */
     const char *cc = getenv("CC");
     if (!cc || !cc[0]) cc = "gcc";
+
+    /* Try SDL2-config for proper flags, fall back to -lSDL2 */
+    char sdl2_flags[1024] = "-lSDL2";
+    FILE *sdl_pipe = popen("sdl2-config --libs 2>/dev/null", "r");
+    if (sdl_pipe) {
+        if (fgets(sdl2_flags, sizeof(sdl2_flags), sdl_pipe)) {
+            /* strip trailing newline */
+            size_t len = strlen(sdl2_flags);
+            while (len > 0 && (sdl2_flags[len-1] == '\n' || sdl2_flags[len-1] == '\r'))
+                sdl2_flags[--len] = '\0';
+        }
+        pclose(sdl_pipe);
+    }
+
     char cmd[16384];
     snprintf(cmd, sizeof(cmd),
-             "%s -no-pie -o \"%s\" \"%s\" \"%s\" -lSDL2",
-             cc, output_path, obj_path, ui_rt_path);
+             "%s -no-pie -o \"%s\" \"%s\" \"%s\" %s",
+             cc, output_path, obj_path, ui_rt_path, sdl2_flags);
     int rc = system(cmd);
     remove(obj_path);
     remove(ui_rt_path);
-    if (rc != 0) { fprintf(stderr, "llvmgen: UI link failed\n"); return 0; }
+    if (rc != 0) {
+        fprintf(stderr, "llvmgen: UI link failed\n"
+                        "  hint: ensure libsdl2-dev is installed\n"
+                        "  tried: %s\n", cmd);
+        return 0;
+    }
     return 1;
 }
 
@@ -3390,5 +3620,3 @@ char *llvmgen_emit_ir(Node *program, const LLVMGenOptions *opts) {
     LLVMDisposeMessage(def_triple);
     return result;
 }
-
-#endif /* NIGHT_LLVM_BACKEND */

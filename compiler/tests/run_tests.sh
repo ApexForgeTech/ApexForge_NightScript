@@ -1041,11 +1041,9 @@ printf 'ok 168 - v0.7 interface: vtable struct and coercion fn emitted\n'
 run_capture "interface vtable build" "$NIGHT" build "$PASS_DIR/interface_vtable/main.afns" -o "$TMP_DIR/ivt_bin"
 printf 'ok 169 - v0.7 interface: vtable impl compiles and links\n'
 
-# ── v0.8 LLVM backend ──
-if "$NIGHT" check "$PASS_DIR/hello.afns" --backend llvm >/dev/null 2>&1; then
-
-run_capture "llvm hello build" "$NIGHT" build "$PASS_DIR/hello.afns" -o "$TMP_DIR/llvm_hello" --backend llvm
-printf 'ok 170 - v0.8 llvm: hello world builds with --backend llvm\n'
+# ── v0.8 LLVM backend (sole backend — no --backend flag needed) ──
+run_capture "llvm hello build" "$NIGHT" build "$PASS_DIR/hello.afns" -o "$TMP_DIR/llvm_hello"
+printf 'ok 170 - v0.8 llvm: hello world builds\n'
 
 "$TMP_DIR/llvm_hello" >"$TMP_DIR/stdout" 2>/dev/null || true
 if grep -q "Hello" "$TMP_DIR/stdout" 2>/dev/null; then
@@ -1054,19 +1052,12 @@ else
     printf 'ok 171 - v0.8 llvm: hello world binary executes\n'
 fi
 
-run_capture "llvm arithmetic build" "$NIGHT" build "$PASS_DIR/arithmetic/main.afns" -o "$TMP_DIR/llvm_arith" --backend llvm
-printf 'ok 172 - v0.8 llvm: arithmetic program builds with LLVM backend\n'
+run_capture "llvm arithmetic build" "$NIGHT" build "$PASS_DIR/arithmetic/main.afns" -o "$TMP_DIR/llvm_arith"
+printf 'ok 172 - v0.8 llvm: arithmetic program builds\n'
 
-run_capture "llvm emit-ir" "$NIGHT" build "$PASS_DIR/hello.afns" -o "$TMP_DIR/llvm_hello.ll" --backend llvm
-printf 'ok 173 - v0.8 llvm: emit to output path succeeds\n'
+run_capture "llvm emit-ir" "$NIGHT" codegen "$PASS_DIR/hello.afns"
+assert_contains "$TMP_DIR/stdout" "define" "llvm ir emitted"
+printf 'ok 173 - v0.8 llvm: codegen emits LLVM IR\n'
 
-run_capture "llvm generic fn build" "$NIGHT" build "$PASS_DIR/generic_fn/main.afns" -o "$TMP_DIR/llvm_gfn" --backend llvm
-printf 'ok 174 - v0.8 llvm: generic function builds with LLVM backend\n'
-
-else
-    printf 'ok 170 - v0.8 llvm: backend not available, skipping # SKIP\n'
-    printf 'ok 171 - v0.8 llvm: backend not available, skipping # SKIP\n'
-    printf 'ok 172 - v0.8 llvm: backend not available, skipping # SKIP\n'
-    printf 'ok 173 - v0.8 llvm: backend not available, skipping # SKIP\n'
-    printf 'ok 174 - v0.8 llvm: backend not available, skipping # SKIP\n'
-fi
+run_capture "llvm generic fn build" "$NIGHT" build "$PASS_DIR/generic_fn/main.afns" -o "$TMP_DIR/llvm_gfn"
+printf 'ok 174 - v0.8 llvm: generic function builds\n'

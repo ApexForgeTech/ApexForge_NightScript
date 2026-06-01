@@ -1,8 +1,6 @@
 #ifndef NIGHT_LLVMGEN_H
 #define NIGHT_LLVMGEN_H
 
-#ifdef NIGHT_LLVM_BACKEND
-
 #include "../parser/ast.h"
 
 /* Options for the LLVM backend */
@@ -27,5 +25,4 @@ int llvmgen_generate(Node *program, const char *output_path,
  */
 char *llvmgen_emit_ir(Node *program, const LLVMGenOptions *opts);
 
-#endif /* NIGHT_LLVM_BACKEND */
 #endif /* NIGHT_LLVMGEN_H */

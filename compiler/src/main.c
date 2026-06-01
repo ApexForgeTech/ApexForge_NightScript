@@ -13,9 +13,7 @@
 #include "sema/sema.h"
 #include "typeck/typeck.h"
 
-#ifdef NIGHT_LLVM_BACKEND
 #include "llvmgen/llvmgen.h"
-#endif
 
 typedef enum {
     CMD_CODEGEN,
@@ -42,7 +40,6 @@ typedef struct {
     char *description;
     char *target_mode;
     char *target_arch;
-    char *target_backend;
     char *entry;
     char *output;
     char *optimization;  /* "debug" | "release" — maps to -g | -O2 */
@@ -103,17 +100,21 @@ static char *read_file(const char *path) {
 
 static void print_usage(void) {
     fprintf(stderr,
+            "NightScript compiler v0.8\n"
             "usage:\n"
-            "  night <file.afns>\n"
-            "  night codegen <file.afns>\n"
-            "  night ast <file.afns>\n"
-            "  night check <file.afns>\n"
-            "  night build <file.afns|project-dir> [-o output] [--target arch]\n"
-            "  night run <file.afns|project-dir> [-o output]\n"
-            "  night test [project-dir]\n"
-            "  night fmt [file.afns|project-dir]\n"
-            "  night init [dir]\n"
-            "  night clean [file.afns|project-dir]\n");
+            "  night <file.afns>                         run file directly\n"
+            "  night codegen <file.afns>                 emit LLVM IR to stdout\n"
+            "  night ast <file.afns>                     dump AST\n"
+            "  night check <file.afns>                   type-check only\n"
+            "  night build <file.afns|project-dir>       compile to binary\n"
+            "    [-o output]                             output path\n"
+            "    [--target arch]                         cross-compilation target\n"
+            "    [--opt <0|1|2|3>]                       optimization level\n"
+            "  night run <file.afns|project-dir>         build and run\n"
+            "  night test [project-dir]                  run tests\n"
+            "  night fmt [file.afns|project-dir]         format source\n"
+            "  night init [dir]                          create new project\n"
+            "  night clean [file.afns|project-dir]       remove build output\n");
 }
 
 static char *replace_extension(const char *path, const char *ext) {
@@ -318,7 +319,6 @@ static void project_config_free(ProjectConfig *cfg) {
     free(cfg->description);
     free(cfg->target_mode);
     free(cfg->target_arch);
-    free(cfg->target_backend);
     free(cfg->entry);
     free(cfg->output);
     free(cfg->optimization);
@@ -475,11 +475,6 @@ static int parse_project_config(const char *project_dir, ProjectConfig *cfg) {
                 fprintf(stderr, "error: invalid target.arch in '%s'\n", toml_path);
                 goto cleanup;
             }
-        } else if (!strcmp(section, "target") && !strcmp(key, "backend")) {
-            if (!parse_toml_string(value, &cfg->target_backend)) {
-                fprintf(stderr, "error: invalid target.backend in '%s'\n", toml_path);
-                goto cleanup;
-            }
         } else if (!strcmp(section, "build") && !strcmp(key, "entry")) {
             if (!parse_toml_string(value, &cfg->entry)) {
                 fprintf(stderr, "error: invalid build.entry in '%s'\n", toml_path);
@@ -501,13 +496,10 @@ static int parse_project_config(const char *project_dir, ProjectConfig *cfg) {
         cfg->package_name = path_basename_dup(project_dir);
     if (!cfg->target_mode)
         cfg->target_mode = dup_string("native");
-    if (!cfg->target_backend)
-        cfg->target_backend = dup_string("c");
     if (!cfg->output && cfg->package_name)
         cfg->output = dup_string(cfg->package_name);
 
-    if (!cfg->entry || !cfg->package_name || !cfg->target_mode ||
-        !cfg->target_backend || !cfg->output) {
+    if (!cfg->entry || !cfg->package_name || !cfg->target_mode || !cfg->output) {
         fprintf(stderr, "error: out of memory\n");
         goto cleanup;
     }
@@ -1248,7 +1240,6 @@ static int build_binary(const char *src_path, const char *binary_path,
     if (!compile_source(src_path, &state))
         return 1;
 
-#ifdef NIGHT_LLVM_BACKEND
     {
         int opt = 0;
         if (opt_flags && (strstr(opt_flags, "-O2") || strstr(opt_flags, "-O3")))
@@ -1266,12 +1257,6 @@ static int build_binary(const char *src_path, const char *binary_path,
         compile_state_free(&state);
         return rc;
     }
-#else
-    (void)opt_flags;
-    fprintf(stderr, "error: LLVM backend not compiled in — rebuild with LLVM\n");
-    compile_state_free(&state);
-    return 1;
-#endif
 }
 
 int main(int argc, char **argv) {
@@ -1348,21 +1333,6 @@ int main(int argc, char **argv) {
                 return 1;
             }
             target_arch = argv[argi + 1];
-            argi += 2;
-            continue;
-        }
-
-        if (!strcmp(argv[argi], "--backend")) {
-            /* legacy flag: only "llvm" accepted, "c" is gone */
-            if (argi + 1 >= argc) {
-                fprintf(stderr, "error: expected backend name after --backend\n");
-                return 1;
-            }
-            const char *bname = argv[argi + 1];
-            if (strcmp(bname, "llvm") != 0) {
-                fprintf(stderr, "error: unknown backend '%s' (only 'llvm' is supported)\n", bname);
-                return 1;
-            }
             argi += 2;
             continue;
         }
@@ -1532,15 +1502,10 @@ int main(int argc, char **argv) {
                 printf("OK\n");
             } else {
                 /* CMD_CODEGEN: emit LLVM IR to stdout */
-#ifdef NIGHT_LLVM_BACKEND
                 LLVMGenOptions ir_opts = { NULL, 0, 1 };
                 char *ir = llvmgen_emit_ir(state.ast, &ir_opts);
                 if (ir) { printf("%s", ir); free(ir); }
                 else { fprintf(stderr, "error: IR emission failed\n"); rc = 1; }
-#else
-                fprintf(stderr, "error: LLVM backend not compiled in\n");
-                rc = 1;
-#endif
             }
 
             compile_state_free(&state);

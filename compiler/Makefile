@@ -7,34 +7,33 @@ DEPFLAGS = -MMD -MP
 BUILD_DIR = build
 OBJ_DIR   = $(BUILD_DIR)/obj
 
-SRC       = src/main.c \
-            src/common/arena.c \
-            src/lexer/token.c \
-            src/lexer/lexer.c \
-            src/parser/parser.c \
-            src/parser/ast_dump.c \
-            src/sema/sema.c \
-            src/typeck/typeck.c
-
-OBJ       = $(SRC:src/%.c=$(OBJ_DIR)/%.o)
-DEP       = $(OBJ:.o=.d)
-TARGET    = $(BUILD_DIR)/night
-LDFLAGS   =
-
-# ── LLVM backend (auto-detect llvm-config-18, then llvm-config) ────────────
+# ── LLVM backend (required — auto-detect llvm-config-18, then llvm-config) ──
 LLVM_CONFIG := $(shell command -v llvm-config-18 2>/dev/null || command -v llvm-config 2>/dev/null)
-ifneq ($(LLVM_CONFIG),)
-    LLVM_CFLAGS  := $(shell $(LLVM_CONFIG) --cflags)
-    LLVM_LDFLAGS := $(shell $(LLVM_CONFIG) --ldflags --libs core analysis target native passes 2>/dev/null || \
-                             $(LLVM_CONFIG) --ldflags --libs all)
-    CFLAGS       += $(LLVM_CFLAGS) -DNIGHT_LLVM_BACKEND=1
-    LDFLAGS      += $(LLVM_LDFLAGS)
-    SRC          += src/llvmgen/llvmgen.c
-    OBJ           = $(SRC:src/%.c=$(OBJ_DIR)/%.o)
-    $(info LLVM backend enabled via $(LLVM_CONFIG))
-else
-    $(info LLVM not found — building without LLVM backend)
+ifeq ($(LLVM_CONFIG),)
+    $(error LLVM not found. Install llvm-dev (e.g. apt install llvm-18-dev))
 endif
+
+LLVM_CFLAGS  := $(shell $(LLVM_CONFIG) --cflags)
+LLVM_LDFLAGS := $(shell $(LLVM_CONFIG) --ldflags --libs core analysis target native passes 2>/dev/null || \
+                         $(LLVM_CONFIG) --ldflags --libs all)
+CFLAGS       += $(LLVM_CFLAGS)
+LDFLAGS       = $(LLVM_LDFLAGS)
+
+$(info LLVM backend enabled via $(LLVM_CONFIG))
+
+SRC = src/main.c \
+      src/common/arena.c \
+      src/lexer/token.c \
+      src/lexer/lexer.c \
+      src/parser/parser.c \
+      src/parser/ast_dump.c \
+      src/sema/sema.c \
+      src/typeck/typeck.c \
+      src/llvmgen/llvmgen.c
+
+OBJ    = $(SRC:src/%.c=$(OBJ_DIR)/%.o)
+DEP    = $(OBJ:.o=.d)
+TARGET = $(BUILD_DIR)/night
 
 .PHONY: all clean test
 
